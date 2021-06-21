@@ -1,4 +1,62 @@
 from decimal import Decimal
+import re
+
+
+regex_chars = ['\\', '|', '[', ']', '{', '}', '.', '^', '$', '*', '+', '(', ')']
+
+def regex_escape_str(regex_str):
+    """
+    Takes a string and escapes it so that it cannot mess with a regex pattern
+        when put in one.
+    """
+    for char in regex_chars:
+        regex_str = regex_str.replace(f'{char}', f'\\{char}')
+
+    return regex_str
+
+
+def split_inclusive(pattern:str, string:str, flags:int=0) -> list:
+    """
+    Takes a string and splits it inclusively based on the given pattern.
+
+    For example, it will turn ":Day:Month:Year:" into
+        [":", "Day", ":", "Month", ":", "Year", ":"] if the regex is
+        "(Day|Month|Year)".
+    """
+    ret_list = []
+    curr_index = 0
+    ran = False
+
+    for match in re.finditer(pattern, string, flags):
+        ran = True
+
+        # Add things before the match
+        if (curr_index < match.start()):
+            ret_list.append(string[curr_index:match.start()])
+
+        # Add match
+        ret_list.append(string[match.start():match.end()])
+
+        curr_index = match.end()
+
+    # Add anything after the last match
+    if curr_index < (str_len := len(string)):
+        ret_list.append(string[curr_index:str_len])
+
+    if not ran:
+        return [string]
+    else:
+        return ret_list
+
+
+allowed_date_types = (Decimal, str, int, float, tuple)
+def confirm_is_type_decimal(date):
+    if isinstance(date, Decimal):
+        return date
+    elif isinstance(date, allowed_date_types):
+        return Decimal(date)
+    else:
+        raise AssertionError(f'The given object "{date}" was not of one of the allowed date types {allowed_date_types}.')
 
 
 class TimeSystem:
@@ -13,35 +71,108 @@ class TimeSystem:
     # -------------------------------------------------------------------------
     # General Methods
 
+    def base_to_format(self, date_in_base_unit:Decimal, date_format:str):
+        """
+        Returns the given date_in_base_unit in the given format. The format
+            should feature the name of each unit you want the date presented
+            in. For example, "Day:Month:Year" would give you the day, month,
+            and year seperated by colons, assuming you have units called
+            "Day", "Month", and "Year" defined in your TimeSystem.
+        """
+        self._check_compiled()
+
+        date_in_base_unit = confirm_is_type_decimal(date_in_base_unit)
+
+        split_date_format = self._split_date_format(date_format)
+
+        used_units = []
+
+        for string in split_date_format:
+            if string in self._units_by_name and not (string in used_units):
+                used_units.append(string)
+
+        for i in range(len(used_units)):
+            used_units[i] = self.unit_for_unit_name(used_units[i])
+
+        used_units = sorted(used_units, key=self._sort_units_by_largeness)
+        used_units.reverse() # Make it go from large units to small units
+
+        unit_values = {} # {unit_name:unit_value}
+        remainder = 0
+        curr_num = date_in_base_unit
+
+        # Go from larger to smaller units and figure out what the value of each one is
+        for unit in used_units:
+            # Get what information will be lost when converted to larger unit
+            remainder = curr_num % unit.to_base(1)
+
+            curr_num -= remainder # Make sure remainder is not taken into account later
+
+            unit_values[unit.name] = int(unit.from_base(curr_num))
+
+            curr_num = remainder
+
+        # Parse through split_date_format and replace unit names with their values
+        #   in ret_str
+        ret_str = ''
+
+        for string in split_date_format:
+            if string in unit_values:
+                ret_str += str(unit_values[string])
+            else:
+                ret_str += string
+
+        return ret_str
+
+    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=None):
+        """
+        Takes the given date_format_with_numbers and converts it to the base unit
+            of this TimeSystem assuming that the date_format_with_numbers is
+            formated the same as the given date_format.
+
+        If origional_date_in_base_unit is given, then this method will make
+            sure that the given date_format_with_numbers does not overwrite
+            smaller units not included in it. For example, if the
+            date_format_with_numbers is "2021" and the date_format is "Year",
+            it will make sure that the days, hours, minutes, seconds, etc. are
+            not written over (that they are not made 0 just because they were
+            not included in the date_format).
+        """
+        self._check_compiled()
+        origional_date_in_base_unit = confirm_is_type_decimal(origional_date_in_base_unit)
+        # TODO
 
     def unit_for_unit_name(self, unit_name:str):
+        self._check_compiled()
         assert unit_name in self._units_by_name, f'There is no defined unit in the {self.name} TimeSystem with the name \"{unit_name}\"'
         return self._units_by_name[unit_name]
 
-    def unit_to_base_unit(self, date_in_unit:Decimal, unit_name):
+    def unit_to_base_unit(self, date_in_unit:Decimal, unit_name:str):
         self._check_compiled()
 
-        if not isinstance(date_in_unit, Decimal):
-            date_in_unit = Decimal(date_in_unit)
+        date_in_unit = confirm_is_type_decimal(date_in_unit)
 
         unit = self.unit_for_unit_name(unit_name)
         return unit.to_base(date_in_unit)
 
-    def base_unit_to_unit(self, date_in_base_unit:Decimal, unit_name):
+    def base_unit_to_unit(self, date_in_base_unit:Decimal, unit_name:str):
         self._check_compiled()
 
-        if not isinstance(date_in_base_unit, Decimal):
-            date_in_base_unit = Decimal(date_in_base_unit)
+        date_in_base_unit = confirm_is_type_decimal(date_in_base_unit)
 
         unit = self.unit_for_unit_name(unit_name)
         return unit.from_base(date_in_base_unit)
 
     def add_unit(self, name, conversion_factor:Decimal=Decimal(1), parent_unit_name:str=None):
         assert not (name in [u.name for u in self._units]), 'You cannot have two units with the same name in the TimeSystem.'
+        assert conversion_factor > 0, "The conversion factor between units must always be greater than 0."
+        conversion_factor = confirm_is_type_decimal(conversion_factor)
         self._units.append(self.Unit(name, conversion_factor, parent_unit_name))
         self._compiled = False
 
     def add_exception(self, interval_amount:Decimal, interval_amount_unit_name:str, add_amount:Decimal, add_amount_unit_name:str):
+        interval_amount = confirm_is_type_decimal(interval_amount)
+        add_amount = confirm_is_type_decimal(add_amount)
         interval_amount = Decimal(interval_amount) if not isinstance(interval_amount, Decimal) else interval_amount
         add_amount = Decimal(add_amount) if not isinstance(add_amount, Decimal) else add_amount
 
@@ -79,6 +210,8 @@ class TimeSystem:
                 assert self._base_unit is None, 'You cannot have two base units.'
                 unit.set_parent_unit(None)
                 self._base_unit = unit
+
+        self._compiled = True
 
         # --------------
         # Now figure out working conversion factors (the ones used when actually estimating conversions)
@@ -145,6 +278,39 @@ class TimeSystem:
     # -------------------------------------------------------------------------
     # Helper Methods
 
+    def _sort_units_by_largeness(self, unit):
+        """
+        Use this method as the key to a sort method and it will sort the list
+            of units from small to large.
+        """
+        return unit.get_working_conversion_factor()
+
+    def _get_unit_names_regex(self):
+        """
+        Returns a regular expression that can be used to find all instances of
+            unit names in a string.
+        """
+        unit_names_regex = '('
+        for i, unit_name in enumerate(self._units_by_name.keys()):
+            if i > 0:
+                unit_names_regex += r'|'
+            unit_names_regex += regex_escape_str(unit_name)
+        unit_names_regex += ')'
+
+        return unit_names_regex
+
+    def _split_date_format(self, date_format:str):
+        """
+        Takes a format in a string and splits it inclusively.
+
+        For example, it will turn ":Day:Month:Year:" into
+            [":", "Day", ":", "Month", ":", "Year", ":"] (assuming you have defined
+            units with the names "Day", "Month", and "Year") and return it.
+        """
+        self._check_compiled()
+        unit_names_regex = self._get_unit_names_regex()
+        return split_inclusive(unit_names_regex, date_format)
+
     def _check_compiled(self):
         assert self._compiled, 'You must compile the TimeSystem before using it.'
 
@@ -161,11 +327,8 @@ class TimeSystem:
 
             assert interval_amount > 0, 'The interval that causes time to be added must be greater than 0.'
 
-            if not isinstance(interval_amount, Decimal):
-                interval_amount = Decimal(interval_amount)
-
-            if not isinstance(add_amount, Decimal):
-                add_amount = Decimal(add_amount)
+            interval_amount = confirm_is_type_decimal(interval_amount)
+            add_amount = confirm_is_type_decimal(add_amount)
 
             self.interval_amount = interval_amount # amount of time till this exception comes into affect
             self.interval_amount_unit_name = interval_amount_unit_name # the name of the unit that the inteval amount is in
@@ -178,8 +341,8 @@ class TimeSystem:
     class Unit:
         def __init__(self, name:str, conversion_factor:Decimal=Decimal(1), parent_unit_name:str=None):
             super().__init__()
-            if not isinstance(conversion_factor, Decimal):
-                conversion_factor = Decimal(conversion_factor)
+            conversion_factor = confirm_is_type_decimal(conversion_factor)
+
             self.name = name
             self.parent_unit_name = parent_unit_name
             self.conversion_factor = conversion_factor
@@ -212,17 +375,19 @@ class TimeSystem:
         def _check_has(self, attr):
             assert hasattr(self, attr), f'The parent unit of {self.name} has not been set yet. Probably need to compile the TimeSystem.'
 
-        def to_base(self, date_in_this_unit):
+        def to_base(self, date_in_this_unit:Decimal):
             """
             Converts the number in this unit to the base unit of this TimeSystem.
             """
+            date_in_this_unit = confirm_is_type_decimal(date_in_this_unit)
             parent = self.get_parent_unit()
             return date_in_this_unit if parent is None else parent.to_base(date_in_this_unit) * self.get_working_conversion_factor()
 
-        def from_base(self, date_in_base_unit):
+        def from_base(self, date_in_base_unit:Decimal):
             """
             Converts the number in base unit to this unit of this TimeSystem.
             """
+            date_in_base_unit = confirm_is_type_decimal(date_in_base_unit)
             parent = self.get_parent_unit()
             return date_in_base_unit if parent is None else parent.from_base(date_in_base_unit) / self.get_working_conversion_factor()
 
@@ -283,6 +448,22 @@ if __name__ == '__main__':
     assert year_in_sec == 31556952, 'Conversion from Years to Seconds is Wrong.'
     assert test_base_to_unit(year_in_sec, 'Year') == 1, 'For some reason, the conversion back to Years is wrong'
 
+    day_in_sec = test_unit_to_base(1, 'Day')
+
     test_base_to_unit(test_unit_to_base(1, 'Year'), 'Year')
+
+    print("")
+    print("__Formats__")
+
+    def base_to_format_test(date_in_base, date_format, desired_date_format_result):
+        in_base_format = greg_calander.base_to_format(date_in_base, date_format)
+        print(in_base_format)
+        assert in_base_format == desired_date_format_result, f'Format of year_in_sec is wrong. Should be: {desired_date_format_result}'
+
+    base_to_format_test(year_in_sec, ':Year:Day:Second:', ':1:0:0:')
+    base_to_format_test(year_in_sec + 1, ':Year:Day:Second:', ':1:0:1:')
+    base_to_format_test(year_in_sec + day_in_sec, ':Year:Day:Second:', ':1:1:0:')
+    base_to_format_test(year_in_sec + (day_in_sec * 100) + 1, ':Year:Day:Second:', ':1:100:1:')
+    base_to_format_test((year_in_sec * 2021) + (day_in_sec * 21) + 1, ':Year:Day:Second:', ':2021:21:1:')
 
 

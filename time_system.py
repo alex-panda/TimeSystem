@@ -94,8 +94,8 @@ class TimeSystem:
         for i in range(len(used_units)):
             used_units[i] = self.unit_for_unit_name(used_units[i])
 
-        used_units = sorted(used_units, key=self._sort_units_by_largeness)
-        used_units.reverse() # Make it go from large units to small units
+        # sort so it goes [largest_unit, ..., smallest_unit]
+        used_units = sorted(used_units, reverse=True, key=self._sort_so_smallest_units_first)
 
         unit_values = {} # {unit_name:unit_value}
         remainder = 0
@@ -124,7 +124,7 @@ class TimeSystem:
 
         return ret_str
 
-    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=None):
+    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=0):
         """
         Takes the given date_format_with_numbers and converts it to the base unit
             of this TimeSystem assuming that the date_format_with_numbers is
@@ -133,14 +133,53 @@ class TimeSystem:
         If origional_date_in_base_unit is given, then this method will make
             sure that the given date_format_with_numbers does not overwrite
             smaller units not included in it. For example, if the
-            date_format_with_numbers is "2021" and the date_format is "Year",
+            date_format_with_numbers is ":2021:" and the date_format is ":Year:",
             it will make sure that the days, hours, minutes, seconds, etc. are
-            not written over (that they are not made 0 just because they were
-            not included in the date_format).
+            not overwritten to 0.
         """
         self._check_compiled()
         origional_date_in_base_unit = confirm_is_type_decimal(origional_date_in_base_unit)
-        # TODO
+
+        assert_str = f'"{date_format_with_numbers}" is not in the same format as "{date_format}".'
+
+        split_date_format = self._split_date_format(date_format)
+        split_num_date_format = split_inclusive('-{0,1}[0-9]+\.{0,1}[0-9]*', date_format_with_numbers)
+
+        assert len(split_num_date_format) == len(split_num_date_format), assert_str
+
+        unit_values = {} # {unit_name:unit_value}
+        units_used = []
+
+        date_in_base_unit = 0
+
+        for i in range(len(split_num_date_format)):
+            date_form_str = split_date_format[i]
+            num_date_str = split_num_date_format[i]
+
+            if (not (date_form_str in self._units_by_name)):
+                # Make sure that all delimeters are the same
+                assert num_date_str == date_form_str, assert_str
+
+                continue
+
+            # It must be a number
+            unit = self.unit_for_unit_name(date_form_str) # Get unit of number
+            units_used.append(unit)
+            date_in_base_unit += unit.to_base(Decimal(num_date_str))
+
+        # sort so it goes [largest_unit, ..., smallest_unit]
+        units_used.sort(reverse=True, key=self._sort_so_smallest_units_first)
+
+        orig_remainder = date_in_base_unit # Will be the number of base units not affected by date_format_with_numbers
+        for unit in units_used:
+            # Get what information will be lost when converted to larger unit
+            orig_remainder = orig_remainder % unit.to_base(1)
+
+        # This will make it so that smaller units will not be affected
+        #   (setting the day will not affect the extra minutes or seconds)
+        date_in_base_unit += orig_remainder
+
+        return date_in_base_unit
 
     def unit_for_unit_name(self, unit_name:str):
         self._check_compiled()
@@ -278,7 +317,7 @@ class TimeSystem:
     # -------------------------------------------------------------------------
     # Helper Methods
 
-    def _sort_units_by_largeness(self, unit):
+    def _sort_so_smallest_units_first(self, unit):
         """
         Use this method as the key to a sort method and it will sort the list
             of units from small to large.
@@ -423,6 +462,9 @@ if __name__ == '__main__':
 
     greg_calander.compile()
 
+    print("")
+    print("__Basic_Unit_Conversion__")
+
     def test_unit_to_base(date_in_unit, unit_name):
         date_in_base = greg_calander.unit_to_base_unit(date_in_unit, unit_name)
         print(f'There are {date_in_base} {greg_calander._base_unit.name}(s) in {date_in_unit} {unit_name}(s)')
@@ -436,6 +478,10 @@ if __name__ == '__main__':
     year_in_sec = test_unit_to_base(1, 'Year')
     assert year_in_sec == 31536000, 'Conversion from Years to Seconds is Wrong.'
     assert test_base_to_unit(year_in_sec, 'Year') == 1, 'For some reason, the conversion back to Years is wrong'
+
+
+    print("")
+    print("__Unit_Conversion_With_Exceptions__")
 
     # Add the exceptions that make the Gregorian Calander work
     greg_calander.add_exception(4, 'Year', 1, 'Day') # Every 4 Years, add 1 Day
@@ -453,12 +499,12 @@ if __name__ == '__main__':
     test_base_to_unit(test_unit_to_base(1, 'Year'), 'Year')
 
     print("")
-    print("__Formats__")
+    print("__Base_To_Format__")
 
     def base_to_format_test(date_in_base, date_format, desired_date_format_result):
         in_base_format = greg_calander.base_to_format(date_in_base, date_format)
         print(in_base_format)
-        assert in_base_format == desired_date_format_result, f'Format of year_in_sec is wrong. Should be: {desired_date_format_result}'
+        assert in_base_format == desired_date_format_result, f'Format is wrong. Should be: {desired_date_format_result}'
 
     base_to_format_test(year_in_sec, ':Year:Day:Second:', ':1:0:0:')
     base_to_format_test(year_in_sec + 1, ':Year:Day:Second:', ':1:0:1:')
@@ -466,4 +512,13 @@ if __name__ == '__main__':
     base_to_format_test(year_in_sec + (day_in_sec * 100) + 1, ':Year:Day:Second:', ':1:100:1:')
     base_to_format_test((year_in_sec * 2021) + (day_in_sec * 21) + 1, ':Year:Day:Second:', ':2021:21:1:')
 
+    print("")
+    print("__Format_To_Base__")
+
+    def format_to_base_test(date_in_format, date_format, desired_date_result, origional_date_in_base_unit=0):
+        in_base_unit = greg_calander.format_to_base(date_in_format, date_format, origional_date_in_base_unit)
+        print(f'{date_in_format} = {int(in_base_unit)} {greg_calander._base_unit.name}(s)')
+        assert in_base_unit == desired_date_result, f'Date in base unit is wrong. Should be: {desired_date_result}. ({date_in_format} in {date_format}) {f"origional_date_in_base_unit: {origional_date_in_base_unit}" if origional_date_in_base_unit == 0 else ""}.'
+
+    format_to_base_test(':2021:21:1:', ':Year:Day:Second:', (year_in_sec * 2021) + (day_in_sec * 21) + 1)
 

@@ -170,15 +170,22 @@ class TimeSystem:
         # sort so it goes [largest_unit, ..., smallest_unit]
         units_used.sort(reverse=True, key=self._sort_so_smallest_units_first)
 
-        orig_remainder = date_in_base_unit # Will be the number of base units not affected by date_format_with_numbers
-        for unit in units_used:
-            # Get what information will be lost when converted to larger unit
-            orig_remainder = orig_remainder % unit.to_base(1)
+        # Make it so that when you set Year/Day, it does not also set smaller
+        #   units like Second to 0 just because they were not specified
+        orig_remainder_small = origional_date_in_base_unit  % units_used[-1].to_base(1) # Will be the number of base units not affected by date_format_with_numbers
+        date_in_base_unit += orig_remainder_small
 
-        # This will make it so that smaller units will not be affected
-        #   (setting the day will not affect the extra minutes or seconds)
-        date_in_base_unit += orig_remainder
+        # Make it so that when you set Day/Hour, it does not also set larger
+        #   units like Year to 0 because the larger units weren't specified
+        larger_unit_name = units_used[0].parent_unit_name
 
+        if larger_unit_name is not None:
+            orig_remainder_large = origional_date_in_base_unit % self.unit_for_unit_name(larger_unit_name).to_base(1)
+            orig_remainder_large = origional_date_in_base_unit - orig_remainder_large
+        else:
+            orig_remainder_large = 0
+
+        # Return date in base unit
         return date_in_base_unit
 
     def unit_for_unit_name(self, unit_name:str):
@@ -209,13 +216,11 @@ class TimeSystem:
         self._units.append(self.Unit(name, conversion_factor, parent_unit_name))
         self._compiled = False
 
-    def add_exception(self, interval_amount:Decimal, interval_amount_unit_name:str, add_amount:Decimal, add_amount_unit_name:str):
+    def add_exception(self, name:str, interval_amount:Decimal, interval_amount_unit_name:str, add_amount:Decimal, add_amount_unit_name:str):
         interval_amount = confirm_is_type_decimal(interval_amount)
         add_amount = confirm_is_type_decimal(add_amount)
-        interval_amount = Decimal(interval_amount) if not isinstance(interval_amount, Decimal) else interval_amount
-        add_amount = Decimal(add_amount) if not isinstance(add_amount, Decimal) else add_amount
 
-        self._exceptions.append(self.TimeException(interval_amount, interval_amount_unit_name, add_amount, add_amount_unit_name))
+        self._exceptions.append(self.TimeException(name, interval_amount, interval_amount_unit_name, add_amount, add_amount_unit_name))
         self._compiled = False
 
     def compile(self):
@@ -361,7 +366,7 @@ class TimeSystem:
     # Helper Classes
 
     class TimeException:
-        def __init__(self, interval_amount:Decimal, interval_amount_unit_name:str, add_amount:Decimal, add_amount_unit_name:str):
+        def __init__(self, name:str, interval_amount:Decimal, interval_amount_unit_name:str, add_amount:Decimal, add_amount_unit_name:str):
             super().__init__()
 
             assert interval_amount > 0, 'The interval that causes time to be added must be greater than 0.'
@@ -369,6 +374,7 @@ class TimeSystem:
             interval_amount = confirm_is_type_decimal(interval_amount)
             add_amount = confirm_is_type_decimal(add_amount)
 
+            self.name = name
             self.interval_amount = interval_amount # amount of time till this exception comes into affect
             self.interval_amount_unit_name = interval_amount_unit_name # the name of the unit that the inteval amount is in
             self.add_amount = add_amount # how much time to add every time interval happens (can be negative)
@@ -376,6 +382,36 @@ class TimeSystem:
 
         def __repr__(self):
             return f'TimeException(Every {self.interval_amount} {self.interval_amount_unit_name}(s), add {self.add_amount} {self.add_amount_unit_name}(s))'
+
+    class ExactDivision:
+        def __init__(self, div_name:str, name_of_unit_dividing:str, name_of_unit_dividing_into:str, division_defs:list, division_corrections:list):
+            """
+            An ExactDivision takes a Unit and divides it into smaller pieces exactly.
+                For example, a Year can be divided into Months, and Months are
+                defined in Days. You may be tempted to just make them Units,
+                but then they will be averaged to about 30 days each and you
+                cannot label them as January, February, March, etc. so this is
+                what you should use if you want to label each division.
+
+            division_defs should be in form:
+                [("Name", int), ("January", 31), ("February", 30),("March", 31), ...]
+
+            division_corrections should be in form:
+                [("Name of TimeException", "Name of division_def to fix when exception occurs"),
+                 ("Leap Year 4", "February"), ("Leap Year 100", "February"), ("Leap Year 400", "February")]
+
+                and is so that divisions can be fixed when a TimeException occurs,
+                adding or subtracting time from the unit the ExactDivision is
+                dividing.
+            """
+            self.name = div_name
+            self.name_of_unit_dividing = name_of_unit_dividing
+            self.name_of_unit_dividing_into = name_of_unit_dividing_into
+            self.div_defs = division_defs
+            self.div_corrections = division_corrections
+
+    class RepeatingDivision(ExactDivision):
+        pass
 
     class Unit:
         def __init__(self, name:str, conversion_factor:Decimal=Decimal(1), parent_unit_name:str=None):
@@ -484,9 +520,9 @@ if __name__ == '__main__':
     print("__Unit_Conversion_With_Exceptions__")
 
     # Add the exceptions that make the Gregorian Calander work
-    greg_calander.add_exception(4, 'Year', 1, 'Day') # Every 4 Years, add 1 Day
-    greg_calander.add_exception(100, 'Year', -1, 'Day') # Every 100 Years, add -1 Day to get rid of leap year
-    greg_calander.add_exception(400, 'Year', 1, 'Day') # Every 400 Years, add 1 Day to add leap year back
+    greg_calander.add_exception("Leap Day 4", 4, 'Year', 1, 'Day') # Every 4 Years, add 1 Day
+    greg_calander.add_exception("Leap Day 100", 100, 'Year', -1, 'Day') # Every 100 Years, add -1 Day to get rid of leap year
+    greg_calander.add_exception("Leap Day 400", 400, 'Year', 1, 'Day') # Every 400 Years, add 1 Day to add leap year back
 
     greg_calander.compile()
 
@@ -521,4 +557,6 @@ if __name__ == '__main__':
         assert in_base_unit == desired_date_result, f'Date in base unit is wrong. Should be: {desired_date_result}. ({date_in_format} in {date_format}) {f"origional_date_in_base_unit: {origional_date_in_base_unit}" if origional_date_in_base_unit == 0 else ""}.'
 
     format_to_base_test(':2021:21:1:', ':Year:Day:Second:', (year_in_sec * 2021) + (day_in_sec * 21) + 1)
+
+
 

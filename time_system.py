@@ -503,7 +503,7 @@ if __name__ == '__main__':
 
     def base_to_format_test(date_in_base, date_format, desired_date_format_result):
         in_base_format = greg_calander.base_to_format(date_in_base, date_format)
-        print(in_base_format)
+        print(f'{date_in_base} Second(s) = {in_base_format} ({date_format})')
         assert in_base_format == desired_date_format_result, f'Format is wrong. Should be: {desired_date_format_result}'
 
     base_to_format_test(year_in_sec, ':Year:Day:Second:', ':1:0:0:')
@@ -517,7 +517,7 @@ if __name__ == '__main__':
 
     def format_to_base_test(date_in_format, date_format, desired_date_result, origional_date_in_base_unit=0):
         in_base_unit = greg_calander.format_to_base(date_in_format, date_format, origional_date_in_base_unit)
-        print(f'{date_in_format} = {int(in_base_unit)} {greg_calander._base_unit.name}(s)')
+        print(f'({date_format}) {date_in_format} = {int(in_base_unit)} {greg_calander._base_unit.name}(s)')
         assert in_base_unit == desired_date_result, f'Date in base unit is wrong. Should be: {desired_date_result}. ({date_in_format} in {date_format}) {f"origional_date_in_base_unit: {origional_date_in_base_unit}" if origional_date_in_base_unit == 0 else ""}.'
 
     format_to_base_test(':2021:21:1:', ':Year:Day:Second:', (year_in_sec * 2021) + (day_in_sec * 21) + 1)

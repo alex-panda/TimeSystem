@@ -1,3 +1,18 @@
+"""
+This module holds the TimeSystem class that allows you to define your own
+    time system with its own units. You can have your own formats for your dates
+    and times and convert between different times. There is an example in
+    __name__ == "__main__"
+
+Note: This TimeSystem was modeled to be complex enough to handle the Gergorian
+    Calander, but if you want something more complex then you will probably
+    have to modify it.
+
+TODO:
+    - Allow negative formats to be given so that if a date_in_base_unit is
+        given that is negative, it can be formated as such. This is useful for
+        denoting BC instead of AC
+"""
 from decimal import Decimal
 import re
 
@@ -66,12 +81,14 @@ class TimeSystem:
 
         self._units = []
         self._exceptions = []
+        self._exact_divs = []
+        self._repeating_divs = []
         self._compiled = False
 
     # -------------------------------------------------------------------------
     # General Methods
 
-    def base_to_format(self, date_in_base_unit:Decimal, date_format:str):
+    def base_to_format(self, date_in_base_unit:Decimal, date_format:str, neg_date_format:str=None):
         """
         Returns the given date_in_base_unit in the given format. The format
             should feature the name of each unit you want the date presented
@@ -82,22 +99,36 @@ class TimeSystem:
         self._check_compiled()
 
         date_in_base_unit = confirm_is_type_decimal(date_in_base_unit)
+        if date_in_base_unit < 0:
+            date_in_base_unit *= -1
+            should_be_negative = True
+        else:
+            should_be_negative = False
 
         split_date_format = self._split_date_format(date_format)
 
+        unit_values = {} # {unit_name:unit_value}
         used_units = []
+        used_divs = []
 
+        # Sort out the Units and Divisions from the regular strings
         for string in split_date_format:
-            if string in self._units_by_name and not (string in used_units):
-                used_units.append(string)
+            if string in self._units_by_name:
+                unit = self.unit_for_unit_name(string)
+                if not (unit in used_units):
+                    used_units.append(unit)
 
-        for i in range(len(used_units)):
-            used_units[i] = self.unit_for_unit_name(used_units[i])
+            elif string in self._exact_divs_by_name:
+                div = self._exact_div_for_exact_div_name(string)
+                if not (div in used_divs):
+                    used_divs.append(div)
+
+        # ----------
+        # Do Units
 
         # sort so it goes [largest_unit, ..., smallest_unit]
         used_units = sorted(used_units, reverse=True, key=self._sort_so_smallest_units_first)
 
-        unit_values = {} # {unit_name:unit_value}
         remainder = 0
         curr_num = date_in_base_unit
 
@@ -112,6 +143,33 @@ class TimeSystem:
 
             curr_num = remainder
 
+        # ----------
+        # Do ExactDivisions
+        for div in used_divs:
+            _, offsets_in_base_unit = self._get_exact_div_offsets(date_in_base_unit, div.name)
+
+            unit_dividing = self._unit_for_unit_name(div.name_of_unit_dividing)
+            unit_dividing_into = self._unit_for_unit_name(div.name_of_unit_dividing_into)
+            remainder = date_in_base_unit % unit_dividing.to_base(1)
+            total_offset = 0
+            for i in range(len(offsets_in_base_unit)):
+                # If offsets are:
+                #   ["January", "February", "March"]
+                #   [       31,         28,      31]
+                #   and it is March, then after subtracting 31, 28, and 31,
+                #   from the remainder the remainder should be negative
+                remainder -= offsets_in_base_unit[i]
+                if remainder < 0:
+                    if not (div.name in unit_values):
+                        unit_values[div.name] = i + 1 # + 1 because it is not 0 indexed when dispalyed
+
+                        unit_dividing_into_name = div.name_of_unit_dividing_into
+
+                        if unit_dividing_into_name in unit_values:
+                            unit_values[unit_dividing_into_name] -= int(unit_dividing_into.from_base(total_offset))
+                    break
+                total_offset += offsets_in_base_unit[i]
+
         # Parse through split_date_format and replace unit names with their values
         #   in ret_str
         ret_str = ''
@@ -122,9 +180,13 @@ class TimeSystem:
             else:
                 ret_str += string
 
+        # If should_be_negative, make the resulting format negative
+        if should_be_negative:
+            ret_str = '-' + ret_str
+
         return ret_str
 
-    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=0):
+    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=0, neg_date_format:str=None):
         """
         Takes the given date_format_with_numbers and converts it to the base unit
             of this TimeSystem assuming that the date_format_with_numbers is
@@ -136,36 +198,89 @@ class TimeSystem:
             date_format_with_numbers is ":2021:" and the date_format is ":Year:",
             it will make sure that the days, hours, minutes, seconds, etc. are
             not overwritten to 0.
+
+        If you want a date to be negative (i.e. BC as opposed to AC) you must
+            put the negative symbol first thing (index 0) in the
+            date_format_with_numbers.
         """
         self._check_compiled()
         origional_date_in_base_unit = confirm_is_type_decimal(origional_date_in_base_unit)
 
         assert_str = f'"{date_format_with_numbers}" is not in the same format as "{date_format}".'
 
+        # Split formats
         split_date_format = self._split_date_format(date_format)
-        split_num_date_format = split_inclusive('-{0,1}[0-9]+\.{0,1}[0-9]*', date_format_with_numbers)
+        split_num_date_format = split_inclusive('[0-9]+\.{0,1}[0-9]*', date_format_with_numbers)
 
+        # Make sure that the formats are split into equal number of parts,
+        #   otherwise probably different formats
         assert len(split_num_date_format) == len(split_num_date_format), assert_str
 
-        unit_values = {} # {unit_name:unit_value}
+        units_in_base_unit = {} # {unit_name:unit_value}
         units_used = []
+        exact_divs_used = []
 
-        date_in_base_unit = 0
+        assert len(split_date_format) == len(split_num_date_format), \
+                f'You probably forgot to define a Unit or Division. {split_date_format} is not in format {split_num_date_format}'
 
+        # Actually convert each defined unit to its value in the base unit
         for i in range(len(split_num_date_format)):
             date_form_str = split_date_format[i]
             num_date_str = split_num_date_format[i]
 
-            if (not (date_form_str in self._units_by_name)):
-                # Make sure that all delimeters are the same
-                assert num_date_str == date_form_str, assert_str
+            # Handle Units
+            if date_form_str in self._units_by_name:
+                unit = self.unit_for_unit_name(date_form_str) # Get unit of number
+                if not (unit in units_used):
+                    units_used.append(unit)
+                unit_in_base_unit = unit.to_base(Decimal(num_date_str))
 
-                continue
+                unit_name = unit.name
+                if unit_name in units_in_base_unit:
+                    assert unit_in_base_unit == units_in_base_unit[unit_name], \
+                            f"You specified {unit_name} twice in your format, but did not give it the same value both times."
 
-            # It must be a number
-            unit = self.unit_for_unit_name(date_form_str) # Get unit of number
-            units_used.append(unit)
-            date_in_base_unit += unit.to_base(Decimal(num_date_str))
+                units_in_base_unit[unit_name] = unit_in_base_unit
+
+            # Note ExactDivisions
+            elif date_form_str in self._exact_divs_by_name:
+                exact_divs_used.append((date_form_str, int(num_date_str) - 1))
+
+        # --------
+        # Now find date_in_base_unit
+        date_in_base_unit = 0
+        for unit_in_base_unit in units_in_base_unit.values():
+            date_in_base_unit += unit_in_base_unit
+
+        # And figure out exact divisions
+
+        time_to_add = 0
+        for exact_div_tuple in exact_divs_used:
+            div_name = exact_div_tuple[0]
+            offset_index = exact_div_tuple[1] # Index of what offset to add
+
+            div = self._exact_div_for_exact_div_name(div_name)
+            div_into_unit = self._unit_for_unit_name(div.name_of_unit_dividing_into)
+            if not (div_into_unit in units_used):
+                units_used.append(div_into_unit)
+
+            _, offsets = self._get_exact_div_offsets(date_in_base_unit, div_name)
+
+            # If offsets are:
+            #   ["January", "February", "March"]
+            #   [       31,         28,      31]
+            # and it is march, then the offset is 31 + 28 in order to get to march
+            for i in range(len(offsets)):
+                if i < offset_index:
+                   time_to_add += offsets[i]
+                else:
+                    break
+
+        date_in_base_unit += time_to_add
+
+        # --------
+        # Make sure that no units larger or smaller than specified are overwritten
+        #   to 0
 
         # sort so it goes [largest_unit, ..., smallest_unit]
         units_used.sort(reverse=True, key=self._sort_so_smallest_units_first)
@@ -184,6 +299,25 @@ class TimeSystem:
             orig_remainder_large = origional_date_in_base_unit - orig_remainder_large
         else:
             orig_remainder_large = 0
+
+        # If the date is supposed to negative (i.e. BC instead of AC), make the
+        #   the date_in_base_unit negative
+        num_minus_cnt = 0
+        for i in range(len(date_format_with_numbers)):
+            if date_format_with_numbers[i] == '-':
+                num_minus_cnt += 1
+            else:
+                break
+
+        form_minus_cnt = 0
+        for i in range(len(date_format)):
+            if date_format[i] == '-':
+                form_minus_cnt += 1
+            else:
+                break
+
+        if num_minus_cnt > form_minus_cnt:
+            date_in_base_unit *= -1
 
         # Return date in base unit
         return date_in_base_unit
@@ -210,6 +344,9 @@ class TimeSystem:
         return unit.from_base(date_in_base_unit)
 
     def add_unit(self, name, conversion_factor:Decimal=Decimal(1), parent_unit_name:str=None):
+        """
+        Add a unit to the TimeSystem such as "Minute", "Hour", "Day"
+        """
         assert not (name in [u.name for u in self._units]), 'You cannot have two units with the same name in the TimeSystem.'
         assert conversion_factor > 0, "The conversion factor between units must always be greater than 0."
         conversion_factor = confirm_is_type_decimal(conversion_factor)
@@ -217,11 +354,37 @@ class TimeSystem:
         self._compiled = False
 
     def add_exception(self, name:str, interval_amount:Decimal, interval_amount_unit_name:str, add_amount:Decimal, add_amount_unit_name:str):
+        """
+        Add an exception to the TimeSystem such as "Every Year is 365 Days long except every 4 Years a Year is 366 Days long."
+
+        When adding one of these, think of the arguments as meaning
+            "Every interval_amount interval_amount_unit_name add add_amount add_amount_unit_name."
+            i.e. "Every 4 Years add 1 Day"
+        """
         interval_amount = confirm_is_type_decimal(interval_amount)
         add_amount = confirm_is_type_decimal(add_amount)
 
         self._exceptions.append(self.TimeException(name, interval_amount, interval_amount_unit_name, add_amount, add_amount_unit_name))
         self._compiled = False
+
+    def add_exact_division(self, name:str, name_of_unit_dividing:str, name_of_unit_dividing_into:str, division_defs:list, division_corrections:list):
+        """
+        Add an ExactDivision of a unit. For example, a Month is an ExactDivision
+            of a Year because a Year is 12 Months and every month is labeled
+            with the extra leap days being accounted for every 4 years.
+        """
+        self._exact_divs.append(self.ExactDivision(name, name_of_unit_dividing, name_of_unit_dividing_into, division_defs, division_corrections))
+        self._compiled = False
+
+    def add_repeating_division(self):
+        """
+        Add a RepeatingDivision such as a Week that just repeats over and over
+            again throughout the Year without conforming to TimeExceptions i.e.
+            without adding a day to account for Leap Days.
+        """
+        #self._repeating_divs.append(self.RepeatingDivision)
+        #self._compiled = False
+        raise AssertionError("Unimplemented Method")
 
     def compile(self):
         """
@@ -231,7 +394,8 @@ class TimeSystem:
         """
         # Clean everything in case this TimeSystem was compiled before
         self._units_by_name = {}
-        self._exceptions_by_interval_unit = {}
+        self._exceptions_by_name = {}
+        self._exact_divs_by_name = {}
         self._base_unit = None
 
         for unit in self._units:
@@ -240,8 +404,13 @@ class TimeSystem:
 
         # Put all units in dictionary by name
         for unit in self._units:
-            assert not (unit.name in self._units_by_name), f'There cannot be two units with the same name. Name in conflict: {unit.name}.'
+            assert not (unit.name in self._units_by_name), f'There cannot be two Units with the same name. Name in conflict: {unit.name}.'
             self._units_by_name[unit.name] = unit
+
+        # Put all exceptions in dictionary by name
+        for exception in self._exceptions:
+            assert not (exception.name in self._exceptions_by_name), f'There cannot be two TimeExceptions with the same name. Name in conflict: {exception.name}.'
+            self._exceptions_by_name[exception.name] = exception
 
         # Set up unit hierarchy
         for unit in self._units:
@@ -256,6 +425,37 @@ class TimeSystem:
                 self._base_unit = unit
 
         self._compiled = True
+
+        # Check that all ExactDivisions are valid
+        for div in self._exact_divs:
+            assert not (div.name in self._exact_divs_by_name), f'There cannot be two ExactDivisions with the same name. Name in conflict: {div.name}.'
+            self._exact_divs_by_name[div.name] = div
+
+            # Check that units have been defined (unit_for_unit_name will raise
+            #   error now if they are not)
+            div_dividing_unit = self.unit_for_unit_name(div.name_of_unit_dividing)
+            into_unit = self.unit_for_unit_name(div.name_of_unit_dividing_into)
+
+            # Check that the divs take into account the time added by units
+            #   smaller than ore equal to the unit that they are dividing
+
+            div_dividing_unit_lin = [x for x in reversed(div_dividing_unit.get_lineage())]
+            div_dividing_unit_lin.pop(0) # Pops div_dividing_unit
+
+            for exception in self._exceptions:
+                add_amt_unit_name = exception.add_amount_unit_name
+                exception_add_amt_unit = self.unit_for_unit_name(add_amt_unit_name)
+
+                # If the exception is adding a unit that is smaller than or equal
+                #   to the div_dividing_unit, then the div must account for it
+                if exception_add_amt_unit in div_dividing_unit_lin:
+                    # Check that the div has taken into account this added time
+                    assert div.name_in_div_corrections(exception.name), \
+                            f'The Division named "{div.name}" needs to take into account the time added by the TimeException named "{exception.name}".'
+
+            for div_c in div.div_corrections:
+                assert div.name_in_division_defs(div_c[1]), \
+                        f"{div.name}'s correction for {div_c[0]} corrects {div_c[1]}, a subdivision that is not defined by/in {div.name}."
 
         # --------------
         # Now figure out working conversion factors (the ones used when actually estimating conversions)
@@ -273,7 +473,9 @@ class TimeSystem:
             lin.pop(0) # Remove the unit itself from the lineage so that it only contains units smaller than itself
             assert add_amt_unit in lin, f'A {add_amt_unit.name} is not in the lineage of a(n) {interval_unit.name}. For exceptions, the unit of the amount being added must be in the same lineage as the unit of the interval of the addition. For example, the exception "Every 4 years, add a day" would work because a day is directly between a year and a the base unit of the system, a second. "Every 4 Years, add a Millenia" would not work because it is not only is a millenia larger than a year, but you do not need to convert years to millenia in order to get to the base unit, seconds.'
 
-        # Now, go from smaller units to larger units and figure out their conversion_factor
+        # Now, go from smaller units to larger units and figure out their
+        #   average conversion_factors. For example, if an exception
+        #   adds a day every 4 Years, then a Year is 365.25 Days
         stack = [] if self._base_unit is None else [self._base_unit]
 
         while len(stack) > 0:
@@ -322,20 +524,23 @@ class TimeSystem:
     # -------------------------------------------------------------------------
     # Helper Methods
 
-    def _sort_so_smallest_units_first(self, unit):
+    @staticmethod
+    def _sort_so_smallest_units_first(unit):
         """
         Use this method as the key to a sort method and it will sort the list
             of units from small to large.
         """
         return unit.get_working_conversion_factor()
 
-    def _get_unit_names_regex(self):
+    def _get_names_regex(self):
         """
         Returns a regular expression that can be used to find all instances of
-            unit names in a string.
+            Unit names and Division names in a string.
         """
         unit_names_regex = '('
-        for i, unit_name in enumerate(self._units_by_name.keys()):
+        unit_names = [name for name in self._units_by_name.keys()]
+        unit_names.extend([name for name in self._exact_divs_by_name.keys()])
+        for i, unit_name in enumerate(unit_names):
             if i > 0:
                 unit_names_regex += r'|'
             unit_names_regex += regex_escape_str(unit_name)
@@ -352,7 +557,7 @@ class TimeSystem:
             units with the names "Day", "Month", and "Year") and return it.
         """
         self._check_compiled()
-        unit_names_regex = self._get_unit_names_regex()
+        unit_names_regex = self._get_names_regex()
         return split_inclusive(unit_names_regex, date_format)
 
     def _check_compiled(self):
@@ -361,6 +566,49 @@ class TimeSystem:
     def _unit_for_unit_name(self, unit_name:str):
         assert unit_name in self._units_by_name, f'There is no defined unit in the {self.name} TimeSystem with the name \"{unit_name}\"'
         return self._units_by_name[unit_name]
+
+    def _exact_div_for_exact_div_name(self, div_name:str):
+        assert div_name in self._exact_divs_by_name, f'There is no defined exact_div in the {self.name} TimeSystem with the name \"{div_name}\"'
+        return self._exact_divs_by_name[div_name]
+
+    def _exception_for_exception_name(self, exception_name:str):
+        assert exception_name in self._exceptions_by_name, f'There is no defined TimeException in the {self.name} TimeSystem with the name \"{exception_name}\"'
+        return self._exceptions_by_name[exception_name]
+
+    def _get_exact_div_offsets(self, date_in_base_unit, div_name):
+        """
+        Returns the names of the subdivisions of the ExactDivision
+            ("January", "February", "March", etc.) and the offsets that apply
+            to get to each one.
+        """
+        div = self._exact_div_for_exact_div_name(div_name)
+        unit_dividing = self._unit_for_unit_name(div.name_of_unit_dividing)
+        unit_dividing_into = self._unit_for_unit_name(div.name_of_unit_dividing_into)
+        div_cs = div.div_corrections
+        offset_names = []
+        offsets = []
+        exceptions_used = []
+
+        for div_def in div.div_defs:
+            offset_names.append(div_def[0])
+            offsets.append(unit_dividing_into.to_base(div_def[1]))
+
+        for div_c in div_cs:
+            exception = self._exception_for_exception_name(div_c[0])
+
+            # Check if exception applies for given date
+            interval_unit = self._unit_for_unit_name(exception.interval_amount_unit_name)
+            interval_amt = int(exception.interval_amount)
+
+            # If applies, then add the time
+            if (0 == (int(interval_unit.from_base(date_in_base_unit)) % interval_amt)):
+                add_amt_unit = self._unit_for_unit_name(exception.add_amount_unit_name)
+
+                for i in range(offset_names):
+                    if offset_names[i] == div_c[1]:
+                        offsets[i] += add_amt_unit.to_base(exception.add_amount)
+
+        return offset_names, offsets
 
     # -------------------------------------------------------------------------
     # Helper Classes
@@ -384,7 +632,7 @@ class TimeSystem:
             return f'TimeException(Every {self.interval_amount} {self.interval_amount_unit_name}(s), add {self.add_amount} {self.add_amount_unit_name}(s))'
 
     class ExactDivision:
-        def __init__(self, div_name:str, name_of_unit_dividing:str, name_of_unit_dividing_into:str, division_defs:list, division_corrections:list):
+        def __init__(self, name:str, name_of_unit_dividing:str, name_of_unit_dividing_into:str, division_defs:list, division_corrections:list):
             """
             An ExactDivision takes a Unit and divides it into smaller pieces exactly.
                 For example, a Year can be divided into Months, and Months are
@@ -394,7 +642,7 @@ class TimeSystem:
                 what you should use if you want to label each division.
 
             division_defs should be in form:
-                [("Name", int), ("January", 31), ("February", 30),("March", 31), ...]
+                [("Name", int), ("January", 31), ("February", 28),("March", 31), ...]
 
             division_corrections should be in form:
                 [("Name of TimeException", "Name of division_def to fix when exception occurs"),
@@ -404,11 +652,55 @@ class TimeSystem:
                 adding or subtracting time from the unit the ExactDivision is
                 dividing.
             """
-            self.name = div_name
-            self.name_of_unit_dividing = name_of_unit_dividing
-            self.name_of_unit_dividing_into = name_of_unit_dividing_into
+            assert name is not None, "Every ExactDivision must have a name. It cannot have a Null (None) name."
+            assert name_of_unit_dividing is not None, "Every ExactDivision must have a name_of_unit_dividing. It cannot be Null (None)."
+            assert name_of_unit_dividing_into is not None, "Every ExactDivision must have a name_of_unit_dividing_into. It cannot be Null (None)."
+            assert division_defs is not None, "Every ExactDivision must have division_defs not be None."
+            assert len(division_defs) >= 2, "Every ExactDivision must at least divide their Unit into 2. {name} does not. You need to add more defs to division_defs."
+            assert division_corrections is not None, "Every ExactDivision must have division_defs not be None. It should be at least an empty list []."
+
+            for div_def in division_defs:
+                assert (len(div_def) == 2) and isinstance(div_def[0], str) \
+                        and isinstance(div_def[1], int), \
+                        f'{div_def} in {name} must be in format (str, int)'
+
+            for div_c in division_corrections:
+                assert (len(div_c) == 2) and isinstance(div_c[0], str) \
+                        and isinstance(div_c[1], str), \
+                        f'{div_c} in {name} must be in format (str, str)'
+
+            self.name = name
+            self.name_of_unit_dividing = name_of_unit_dividing # This would be Years if dividing Years into Months
+            self.name_of_unit_dividing_into = name_of_unit_dividing_into # This would be Days if dividing Years into Months
             self.div_defs = division_defs
             self.div_corrections = division_corrections
+
+        def name_in_division_defs(self, name:str):
+            """
+            Returns True if the given name is the name of a subdivision
+                (like "January", "February", "March", etc.) defined by this
+                ExactDivision and False otherwise.
+            """
+            found = False
+            for div_def in self.div_defs:
+                if div_def[0] == name:
+                    found = True
+                    break
+
+            return found
+
+        def name_in_div_corrections(self, name:str):
+            """
+            Returns true if the given name is the name of a TimeException whose
+                add_amount is accounted for and False otherwise.
+            """
+            found = False
+            for div_c in self.div_corrections:
+                if div_c[0] == name:
+                    found = True
+                    break
+
+            return found
 
     class RepeatingDivision(ExactDivision):
         pass
@@ -517,12 +809,15 @@ if __name__ == '__main__':
 
 
     print("")
-    print("__Unit_Conversion_With_Exceptions__")
+    print("__Unit_Conversion_With_Time_Exceptions__")
 
     # Add the exceptions that make the Gregorian Calander work
-    greg_calander.add_exception("Leap Day 4", 4, 'Year', 1, 'Day') # Every 4 Years, add 1 Day
-    greg_calander.add_exception("Leap Day 100", 100, 'Year', -1, 'Day') # Every 100 Years, add -1 Day to get rid of leap year
-    greg_calander.add_exception("Leap Day 400", 400, 'Year', 1, 'Day') # Every 400 Years, add 1 Day to add leap year back
+    LEAP_DAY_4 = "Leap Day 4"
+    LEAP_DAY_100 = "Leap Day 100"
+    LEAP_DAY_400 = "Leap Day 400"
+    greg_calander.add_exception(LEAP_DAY_4, 4, 'Year', 1, 'Day') # Every 4 Years, add 1 Day
+    greg_calander.add_exception(LEAP_DAY_100, 100, 'Year', -1, 'Day') # Every 100 Years, add -1 Day to get rid of leap year
+    greg_calander.add_exception(LEAP_DAY_400, 400, 'Year', 1, 'Day') # Every 400 Years, add 1 Day to add leap year back
 
     greg_calander.compile()
 
@@ -541,6 +836,7 @@ if __name__ == '__main__':
         in_base_format = greg_calander.base_to_format(date_in_base, date_format)
         print(f'{date_in_base} Second(s) = {in_base_format} ({date_format})')
         assert in_base_format == desired_date_format_result, f'Format is wrong. Should be: {desired_date_format_result}'
+        return in_base_format
 
     base_to_format_test(year_in_sec, ':Year:Day:Second:', ':1:0:0:')
     base_to_format_test(year_in_sec + 1, ':Year:Day:Second:', ':1:0:1:')
@@ -555,8 +851,27 @@ if __name__ == '__main__':
         in_base_unit = greg_calander.format_to_base(date_in_format, date_format, origional_date_in_base_unit)
         print(f'({date_format}) {date_in_format} = {int(in_base_unit)} {greg_calander._base_unit.name}(s)')
         assert in_base_unit == desired_date_result, f'Date in base unit is wrong. Should be: {desired_date_result}. ({date_in_format} in {date_format}) {f"origional_date_in_base_unit: {origional_date_in_base_unit}" if origional_date_in_base_unit == 0 else ""}.'
+        return in_base_unit
 
     format_to_base_test(':2021:21:1:', ':Year:Day:Second:', (year_in_sec * 2021) + (day_in_sec * 21) + 1)
+    format_to_base_test('-:2021:21:1:', ':Year:Day:Second:', -((year_in_sec * 2021) + (day_in_sec * 21) + 1))
+
+    # Define Month
+    FEBRUARY = 'February'
+    greg_calander.add_exact_division("Month", "Year", "Day",
+            [
+                ('January', 31),   (FEBRUARY, 28), ('March', 31),    ('April', 30),
+                ('May', 31),       ('June', 30),     ('July', 31),     ('August', 31),
+                ('Septemder', 30), ('October', 31),  ('November', 30), ('December', 31)
+            ],
+            [
+                (LEAP_DAY_4, FEBRUARY), (LEAP_DAY_100, FEBRUARY), (LEAP_DAY_400, FEBRUARY)
+            ])
+    greg_calander.compile()
+
+    AMERICAN_FORMAT = 'Month/Day/Year'
+    in_base = format_to_base_test('6/26/2021', AMERICAN_FORMAT, 63791892792)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '6/26/2021')
 
 
 

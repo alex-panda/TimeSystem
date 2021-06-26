@@ -8,10 +8,19 @@ Note: This TimeSystem was modeled to be complex enough to handle the Gergorian
     Calander, but if you want something more complex then you will probably
     have to modify it.
 
+Note: This TimeSystem is made to be consistent. If you convert 5/20/2020
+    to seconds then you should get 5/20/2020 when you convert those seconds
+    back into the format. It may, however, be a bit off when you are just
+    trying to get the number of seconds in 100000000 Years, because it
+    turns the "Every 4 years, add 1 day." into an estimate (1 Year = 365.25 Days)
+
 TODO:
     - Allow negative formats to be given so that if a date_in_base_unit is
         given that is negative, it can be formated as such. This is useful for
         denoting BC instead of AC
+    - Make it so that the names of subdivisions can be used (so if doing Months,
+        then you can say "January" instead of "1" in your format)
+    - Add support for RepeatingDivisions like Weeks
 """
 from decimal import Decimal
 import re
@@ -88,15 +97,22 @@ class TimeSystem:
     # -------------------------------------------------------------------------
     # General Methods
 
-    def base_to_format(self, date_in_base_unit:Decimal, date_format:str, neg_date_format:str=None):
+    def base_to_format(self, date_in_base_unit:Decimal, date_format:str, neg_date_format:str=None, one_based_units:list=None) -> str:
         """
         Returns the given date_in_base_unit in the given format. The format
             should feature the name of each unit you want the date presented
             in. For example, "Day:Month:Year" would give you the day, month,
             and year seperated by colons, assuming you have units called
             "Day", "Month", and "Year" defined in your TimeSystem.
+
+        one_based_units are the units where they should start at 1. For example,
+            0/1/2021 does not exist because Months start at January being 1 so it
+            would be 1/1/2021 so you would pass a list like ["Month", "Day"]
+            to this method to make it so.
         """
         self._check_compiled()
+
+        one_based_units = [] if one_based_units is None else one_based_units
 
         date_in_base_unit = confirm_is_type_decimal(date_in_base_unit)
         if date_in_base_unit < 0:
@@ -139,7 +155,10 @@ class TimeSystem:
 
             curr_num -= remainder # Make sure remainder is not taken into account later
 
-            unit_values[unit.name] = int(unit.from_base(curr_num))
+            if unit.name in one_based_units:
+                unit_values[unit.name] = int(unit.from_base(curr_num) + 1)
+            else:
+                unit_values[unit.name] = int(unit.from_base(curr_num))
 
             curr_num = remainder
 
@@ -161,7 +180,10 @@ class TimeSystem:
                 remainder -= offsets_in_base_unit[i]
                 if remainder < 0:
                     if not (div.name in unit_values):
-                        unit_values[div.name] = i + 1 # + 1 because it is not 0 indexed when dispalyed
+                        if div.name in one_based_units:
+                            unit_values[div.name] = i + 1
+                        else:
+                            unit_values[div.name] = i
 
                         unit_dividing_into_name = div.name_of_unit_dividing_into
 
@@ -186,7 +208,7 @@ class TimeSystem:
 
         return ret_str
 
-    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=0, neg_date_format:str=None):
+    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=0, neg_date_format:str=None, one_based_units:list=None) -> int:
         """
         Takes the given date_format_with_numbers and converts it to the base unit
             of this TimeSystem assuming that the date_format_with_numbers is
@@ -201,9 +223,18 @@ class TimeSystem:
 
         If you want a date to be negative (i.e. BC as opposed to AC) you must
             put the negative symbol first thing (index 0) in the
-            date_format_with_numbers.
+            date_format_with_numbers (as in "-6/26/2021").
+
+
+        one_based_units are the units where they should start at 1. For example,
+            0/1/2021 does not exist because Months start at January being 1 so it
+            would be 1/1/2021 so you would pass a tuple like ("Month", "Day")
+            to this method to make it so.
         """
         self._check_compiled()
+
+        one_based_units = [] if one_based_units is None else one_based_units
+
         origional_date_in_base_unit = confirm_is_type_decimal(origional_date_in_base_unit)
 
         assert_str = f'"{date_format_with_numbers}" is not in the same format as "{date_format}".'
@@ -221,38 +252,45 @@ class TimeSystem:
         exact_divs_used = []
 
         assert len(split_date_format) == len(split_num_date_format), \
-                f'You probably forgot to define a Unit or Division. {split_date_format} is not in format {split_num_date_format}'
+                f'You probably forgot to define/add a Unit or Division. {split_date_format} is not in format {split_num_date_format}'
 
         # Actually convert each defined unit to its value in the base unit
         for i in range(len(split_num_date_format)):
             date_form_str = split_date_format[i]
             num_date_str = split_num_date_format[i]
 
-            # Handle Units
+            # Evaluate Units
             if date_form_str in self._units_by_name:
                 unit = self.unit_for_unit_name(date_form_str) # Get unit of number
                 if not (unit in units_used):
                     units_used.append(unit)
-                unit_in_base_unit = unit.to_base(Decimal(num_date_str))
+
+                if unit.name in one_based_units:
+                    unit_in_base_unit = unit.to_base(Decimal(num_date_str) - 1)
+                else:
+                    unit_in_base_unit = unit.to_base(Decimal(num_date_str))
 
                 unit_name = unit.name
                 if unit_name in units_in_base_unit:
                     assert unit_in_base_unit == units_in_base_unit[unit_name], \
-                            f"You specified {unit_name} twice in your format, but did not give it the same value both times."
+                            f'You specified "{unit_name}" twice in your format, but did not give it the same value both times.'
 
                 units_in_base_unit[unit_name] = unit_in_base_unit
 
             # Note ExactDivisions
             elif date_form_str in self._exact_divs_by_name:
-                exact_divs_used.append((date_form_str, int(num_date_str) - 1))
+                if date_form_str in one_based_units:
+                    exact_divs_used.append((date_form_str, int(num_date_str) - 1))
+                else:
+                    exact_divs_used.append((date_form_str, int(num_date_str)))
 
         # --------
-        # Now find date_in_base_unit
-        date_in_base_unit = 0
+        # Now find date_in_base_unit without Divisions added
+        date_in_base_unit = Decimal(0)
         for unit_in_base_unit in units_in_base_unit.values():
             date_in_base_unit += unit_in_base_unit
 
-        # And figure out exact divisions
+        # Now figure out exact divisions
 
         time_to_add = 0
         for exact_div_tuple in exact_divs_used:
@@ -320,7 +358,7 @@ class TimeSystem:
             date_in_base_unit *= -1
 
         # Return date in base unit
-        return date_in_base_unit
+        return int(date_in_base_unit)
 
     def unit_for_unit_name(self, unit_name:str):
         self._check_compiled()
@@ -604,7 +642,7 @@ class TimeSystem:
             if (0 == (int(interval_unit.from_base(date_in_base_unit)) % interval_amt)):
                 add_amt_unit = self._unit_for_unit_name(exception.add_amount_unit_name)
 
-                for i in range(offset_names):
+                for i in range(len(offset_names)):
                     if offset_names[i] == div_c[1]:
                         offsets[i] += add_amt_unit.to_base(exception.add_amount)
 
@@ -832,8 +870,9 @@ if __name__ == '__main__':
     print("")
     print("__Base_To_Format__")
 
-    def base_to_format_test(date_in_base, date_format, desired_date_format_result):
-        in_base_format = greg_calander.base_to_format(date_in_base, date_format)
+    def base_to_format_test(date_in_base, date_format, desired_date_format_result, one_based_units=None):
+        one_based_units = [] if one_based_units is None else one_based_units
+        in_base_format = greg_calander.base_to_format(date_in_base, date_format, one_based_units=one_based_units)
         print(f'{date_in_base} Second(s) = {in_base_format} ({date_format})')
         assert in_base_format == desired_date_format_result, f'Format is wrong. Should be: {desired_date_format_result}'
         return in_base_format
@@ -847,8 +886,9 @@ if __name__ == '__main__':
     print("")
     print("__Format_To_Base__")
 
-    def format_to_base_test(date_in_format, date_format, desired_date_result, origional_date_in_base_unit=0):
-        in_base_unit = greg_calander.format_to_base(date_in_format, date_format, origional_date_in_base_unit)
+    def format_to_base_test(date_in_format, date_format, desired_date_result, origional_date_in_base_unit=0, one_based_units=None):
+        one_based_units = [] if one_based_units is None else one_based_units
+        in_base_unit = greg_calander.format_to_base(date_in_format, date_format, origional_date_in_base_unit, one_based_units=one_based_units)
         print(f'({date_format}) {date_in_format} = {int(in_base_unit)} {greg_calander._base_unit.name}(s)')
         assert in_base_unit == desired_date_result, f'Date in base unit is wrong. Should be: {desired_date_result}. ({date_in_format} in {date_format}) {f"origional_date_in_base_unit: {origional_date_in_base_unit}" if origional_date_in_base_unit == 0 else ""}.'
         return in_base_unit
@@ -869,9 +909,23 @@ if __name__ == '__main__':
             ])
     greg_calander.compile()
 
+    ONE_BASED_UNITS = ["Month", "Day"]
+
     AMERICAN_FORMAT = 'Month/Day/Year'
-    in_base = format_to_base_test('6/26/2021', AMERICAN_FORMAT, 63791892792)
-    base_to_format_test(in_base, AMERICAN_FORMAT, '6/26/2021')
+    in_base = format_to_base_test('6/26/2021', AMERICAN_FORMAT, 63791806392, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '6/26/2021', ONE_BASED_UNITS)
+
+    print("")
+    print("__Leap_Years__")
+
+    in_base = format_to_base_test('2/29/2020', AMERICAN_FORMAT, 63750140640, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2020', ONE_BASED_UNITS)
+
+    in_base = format_to_base_test('2/29/2100', AMERICAN_FORMAT, 66274696800, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '3/1/2100', ONE_BASED_UNITS)
+
+    in_base = format_to_base_test('2/29/2400', AMERICAN_FORMAT, 75741782400, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2400', ONE_BASED_UNITS)
 
 
 

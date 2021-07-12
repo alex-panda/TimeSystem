@@ -17,12 +17,12 @@ Note: This TimeSystem is made to be consistent. If you convert 5/20/2020
 TODO:
     - Allow negative formats to be given so that if a date_in_base_unit is
         given that is negative, it can be formated as such. This is useful for
-        denoting BC instead of AC
+        denoting dates that are in BC instead of AC
     - Make it so that the names of subdivisions can be used (so if doing Months,
         then you can say "January" instead of "1" in your format)
     - Add support for RepeatingDivisions like Weeks
 """
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import re
 
 
@@ -84,6 +84,45 @@ def confirm_is_type_decimal(date):
 
 
 class TimeSystem:
+    """
+    A class that allows you to define your own time system and allows you to
+        convert from Dates/Times in formats to the Dates/Times in the base unit
+        of the time system (which is useful for storage of the Date/Time if you
+        want to be able to change that same Date/Time to a different format
+        later).
+
+    The nickname parameter is for being able to define nicknames such as
+        Mon., Tue., Wed., etc. to values. For example, if it is a Tuesday, then
+        the value will be 2 because it is the 3rd day of the week (it is zero-
+        indexed, even for one_based units). It is in the following format, with
+        'nick_for' being the key to get what the name of the Unit that this
+        nickname is for is. For example, the format could be typed as
+        'Day/wk/mn' as opposed to 'Day/Week/Month' if you want the nicknames
+        below to go into affect.
+        {
+        'wk': {
+                'nick_for': 'Week',
+                'names': {
+                    0: 'Sun.',
+                    1: 'Mon.',
+                    2: 'Tue.',
+                    3: 'Wed.',
+                    4: 'Thu.',
+                    5: 'Fri.',
+                    6: 'Sat.'
+                }
+            },
+        'mn': {
+                'nick_for': 'Month',
+                'names': {
+                    0: 'Jan.',
+                    1: 'Feb.',
+                    2: 'Mar.',
+                    ...
+                }
+            }
+        }
+    """
     def __init__(self, name):
         super().__init__()
         self.name = name
@@ -97,7 +136,7 @@ class TimeSystem:
     # -------------------------------------------------------------------------
     # General Methods
 
-    def base_to_format(self, date_in_base_unit:Decimal, date_format:str, neg_date_format:str=None, one_based_units:list=None) -> str:
+    def base_to_format(self, date_in_base_unit:Decimal, date_format:str, neg_date_format:str=None, one_based_units:list=None, nicknames:dict=None) -> str:
         """
         Returns the given date_in_base_unit in the given format. The format
             should feature the name of each unit you want the date presented
@@ -109,26 +148,43 @@ class TimeSystem:
             0/1/2021 does not exist because Months start at January being 1 so it
             would be 1/1/2021 so you would pass a list like ["Month", "Day"]
             to this method to make it so.
+
+        nicknames is described in the comment for this class because it is used
+            in multiple methods
         """
         self._check_compiled()
 
         one_based_units = [] if one_based_units is None else one_based_units
+        nicknames = [] if nicknames is None else nicknames
 
         date_in_base_unit = confirm_is_type_decimal(date_in_base_unit)
+
+        # Decide whether the neg_date_format should be used or not
+        should_be_neg = False
         if date_in_base_unit < 0:
-            date_in_base_unit *= -1
-            should_be_negative = True
+            date_in_base_unit *= -1 # Having the date be negative might mess things up, so make it possitive
+
+            if neg_date_format is not None:
+                should_be_neg = True
+
+        if should_be_neg:
+            split_date_format = self._split_date_format(neg_date_format, nicknames)
         else:
-            should_be_negative = False
+            split_date_format = self._split_date_format(date_format, nicknames)
 
-        split_date_format = self._split_date_format(date_format)
-
+        # Sort out the Units and Divisions from the other delimiting strings
         unit_values = {} # {unit_name:unit_value}
         used_units = []
-        used_divs = []
+        used_exact_divs = []
+        used_repeating_divs = []
 
-        # Sort out the Units and Divisions from the regular strings
-        for string in split_date_format:
+        for i in range(len(split_date_format)):
+            string = split_date_format[i]
+
+            # Change out nicknames for proper names of units/divisions
+            if string in nicknames:
+                string = nicknames[string]['nick_for']
+
             if string in self._units_by_name:
                 unit = self.unit_for_unit_name(string)
                 if not (unit in used_units):
@@ -136,8 +192,13 @@ class TimeSystem:
 
             elif string in self._exact_divs_by_name:
                 div = self._exact_div_for_exact_div_name(string)
-                if not (div in used_divs):
-                    used_divs.append(div)
+                if not (div in used_exact_divs):
+                    used_exact_divs.append(div)
+
+            elif string in self._repeating_divs_by_name:
+                div = self._repeating_div_for_repeating_div_name(string)
+                if not (div in used_repeating_divs):
+                    used_repeating_divs.append(div)
 
         # ----------
         # Do Units
@@ -156,7 +217,7 @@ class TimeSystem:
             curr_num -= remainder # Make sure remainder is not taken into account later
 
             if unit.name in one_based_units:
-                unit_values[unit.name] = int(unit.from_base(curr_num) + 1)
+                unit_values[unit.name] = int(unit.from_base(curr_num)) + 1
             else:
                 unit_values[unit.name] = int(unit.from_base(curr_num))
 
@@ -164,7 +225,7 @@ class TimeSystem:
 
         # ----------
         # Do ExactDivisions
-        for div in used_divs:
+        for div in used_exact_divs:
             _, offsets_in_base_unit = self._get_exact_div_offsets(date_in_base_unit, div.name)
 
             unit_dividing = self._unit_for_unit_name(div.name_of_unit_dividing)
@@ -175,11 +236,12 @@ class TimeSystem:
                 # If offsets are:
                 #   ["January", "February", "March"]
                 #   [       31,         28,      31]
-                #   and it is March, then after subtracting 31, 28, and 31,
-                #   from the remainder the remainder should be negative
+                #   and it is March, then after subtracting 31, 28, and 31
+                #   from the remainder should make the remainder negative
                 remainder -= offsets_in_base_unit[i]
-                if remainder < 0:
+                if remainder <= 0:
                     if not (div.name in unit_values):
+
                         if div.name in one_based_units:
                             unit_values[div.name] = i + 1
                         else:
@@ -192,23 +254,56 @@ class TimeSystem:
                     break
                 total_offset += offsets_in_base_unit[i]
 
+        # ----------
+        # Do RepeatingDivisions
+        for div in self._repeating_divs:
+            unit_in = self._unit_for_unit_name(div.name_of_unit_in)
+
+            rep_time_in_base_unit = unit_in.to_base(unit_in)
+            remainder = date_in_base_unit % rep_time_in_base_unit
+
+            offset_names = [o[0] for o in div.division_defs]
+            offsets_in_base = [unit_in.to_base(o[1]) for o in div.division_defs]
+
+            for i in range(len(offset_names)):
+                remainder -= offsets_in_base[i]
+
+                if remainder <= 0:
+                    if not (div.name in unit_values):
+                        if div.name in one_based_units:
+                            unit_values[div.name] = i + 1
+                        else:
+                            unit_values[div.name] = i
+
+                    break
+
+        # ----------
         # Parse through split_date_format and replace unit names with their values
         #   in ret_str
         ret_str = ''
 
         for string in split_date_format:
-            if string in unit_values:
-                ret_str += str(unit_values[string])
+            unit_str = string
+            if string in nicknames:
+                unit_str = nicknames[string]['nick_for']
+                nick_vals = nicknames['names']
+            else:
+                nick_vals = {}
+
+            if unit_str in unit_values:
+                val = unit_values[unit_str]
+
+                if val in nick_vals:
+                    ret_str += str(nick_vals[val])
+
+                else:
+                    ret_str += str(val)
             else:
                 ret_str += string
 
-        # If should_be_negative, make the resulting format negative
-        if should_be_negative:
-            ret_str = '-' + ret_str
-
         return ret_str
 
-    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=0, neg_date_format:str=None, one_based_units:list=None) -> int:
+    def format_to_base(self, date_format_with_numbers:str, date_format:str, origional_date_in_base_unit:Decimal=Decimal(0), neg_date_format:str=None, one_based_units:list=None, nicknames:dict=None) -> int:
         """
         Takes the given date_format_with_numbers and converts it to the base unit
             of this TimeSystem assuming that the date_format_with_numbers is
@@ -222,34 +317,61 @@ class TimeSystem:
             not overwritten to 0.
 
         If you want a date to be negative (i.e. BC as opposed to AC) you must
-            put the negative symbol first thing (index 0) in the
-            date_format_with_numbers (as in "-6/26/2021").
-
+            put give a format for the neg_date_format and the date_format_with_numbers
+            must match it moreso than the positive date_format.
 
         one_based_units are the units where they should start at 1. For example,
             0/1/2021 does not exist because Months start at January being 1 so it
-            would be 1/1/2021 so you would pass a tuple like ("Month", "Day")
+            would be 1/1/2021 so you would pass a list like ["Month", "Day"]
             to this method to make it so.
+
+        nicknames is described in the comment for this class because it is used
+            in multiple methods
         """
         self._check_compiled()
 
         one_based_units = [] if one_based_units is None else one_based_units
+        nicknames = [] if nicknames is None else nicknames
 
         origional_date_in_base_unit = confirm_is_type_decimal(origional_date_in_base_unit)
 
-        assert_str = f'"{date_format_with_numbers}" is not in the same format as "{date_format}".'
+        nicknames_set = set()
+        for _, val in nicknames:
+            nicknames_set.update(val['names'].values())
 
         # Split formats
-        split_date_format = self._split_date_format(date_format)
         split_num_date_format = split_inclusive('[0-9]+\.{0,1}[0-9]*', date_format_with_numbers)
+        split_pos_date_format = self._split_date_format(date_format, nicknames_set)
+        is_neg = False
 
-        # Make sure that the formats are split into equal number of parts,
-        #   otherwise probably different formats
-        assert len(split_num_date_format) == len(split_num_date_format), assert_str
+        # Handle it if there is a negative format given
+        if neg_date_format:
+            # since possibly in negative date format, we must figure out whether
+            #   the date_format_with_numbers is actually in the negative
+            #   format or not
+            split_neg_date_format = self._split_date_format(neg_date_format, nicknames_set)
+
+            pos_date = self._check_formats_same(split_num_date_format, split_pos_date_format, nicknames_set)
+            neg_date = self._check_formats_same(split_num_date_format, split_neg_date_format, nicknames_set)
+
+            assert not (neg_date and pos_date), \
+                    f'You gave both the positive date format "{date_format}" and the negative date format "{neg_date_format}" but they both match the given date_format_with_numbers "{date_format_with_numbers}".'
+            assert neg_date or pos_date, \
+                    f'You gave both the positive date format "{date_format}" and the negative date format "{neg_date_format}" but neither of them match the given date_format_with_numbers "{date_format_with_numbers}".'
+
+            if pos_date:
+                split_date_format = split_pos_date_format
+            else:
+                split_date_format = split_neg_date_format
+                is_neg = True
+
+        else:
+            split_date_format = split_pos_date_format
 
         units_in_base_unit = {} # {unit_name:unit_value}
         units_used = []
         exact_divs_used = []
+        rep_divs_used = []
 
         assert len(split_date_format) == len(split_num_date_format), \
                 f'You probably forgot to define/add a Unit or Division. {split_date_format} is not in format {split_num_date_format}'
@@ -259,7 +381,24 @@ class TimeSystem:
             date_form_str = split_date_format[i]
             num_date_str = split_num_date_format[i]
 
-            # Evaluate Units
+            # Abreviations like 'MN' need to be turned into what they stand for
+            #   example: 'MN' turned into 'Month'
+            if date_form_str in nicknames:
+                date_form_str = nicknames[date_form_str]['nick_for']
+
+            # If num_date_str str is a nickname (i.e. Mon., Tue., Wed., etc.) then
+            #   convert it to its value (0, 1, 2, etc.)
+            if num_date_str in nicknames_set:
+                for type_as, val in nicknames:
+                    for key, value in val['names']:
+                        if num_date_str == value:
+                            num_date_str = key
+                            break_out = True
+                            break
+                    if break_out:
+                        break
+
+            # Evaluate Units to base Unit
             if date_form_str in self._units_by_name:
                 unit = self.unit_for_unit_name(date_form_str) # Get unit of number
                 if not (unit in units_used):
@@ -283,6 +422,13 @@ class TimeSystem:
                     exact_divs_used.append((date_form_str, int(num_date_str) - 1))
                 else:
                     exact_divs_used.append((date_form_str, int(num_date_str)))
+
+            # Note RepeatingDivisions
+            elif date_form_str in self._repeating_divs_by_name:
+                if date_form_str in one_based_units:
+                    rep_divs_used.append((date_form_str, int(num_date_str - 1)))
+                else:
+                    rep_divs_used.append((date_form_str, int(num_date_str)))
 
         # --------
         # Now find date_in_base_unit without Divisions added
@@ -316,6 +462,53 @@ class TimeSystem:
 
         date_in_base_unit += time_to_add
 
+        # Now figure out repeating divisions, making the current date allign
+        #   with them.
+        for rep_div_tuple in rep_divs_used:
+            div_name = rep_div_tuple[0]
+            target_day = rep_div_tuple[1] # Index of what day of the week it supposed to be
+
+            div = self._repeating_div_for_repeating_div_name(div_name)
+
+            div_total = Decimal(0)
+            unit_in = self._unit_for_unit_name(div.name_of_unit_in)
+            for div_def in div.division_defs:
+                div_total += div_def[1]
+            div_total = unit_in.to_base(div_total)
+
+            remainder = date_in_base_unit % div_total
+
+            curr_day = int(unit_in.from_base(remainder)) # What day of the week it currently is
+
+            time_to_add = Decimal(0)
+
+            if curr_day < target_day:
+                # must add time to get to target day
+                for i, div_def in enumerate(div.division_defs):
+                    if i >= target_day:
+                        break
+
+                    if i >= curr_day:
+                        # Add amount of time to get to next day
+                        time_to_add += div_def[1]
+
+                date_in_base_unit += unit_in.to_base(time_to_add)
+
+            elif target_day > curr_day:
+                # Must subtract time to get to target day
+                for i, div_def in enumerate(reversed(div.division_defs)):
+                    if i >= len(div.division_defs) - curr_day - 1:
+                        break
+
+                    if i >= len(div.division_defs) - target_day - 1:
+                        # Add amount of time to get to next day
+                        time_to_add += div_def[1]
+
+                date_in_base_unit -= unit_in.to_base(time_to_add)
+
+            if not (div.name_of_unit_in in units_used):
+                units_used.append(div.name_of_unit_in)
+
         # --------
         # Make sure that no units larger or smaller than specified are overwritten
         #   to 0
@@ -340,25 +533,11 @@ class TimeSystem:
 
         # If the date is supposed to negative (i.e. BC instead of AC), make the
         #   the date_in_base_unit negative
-        num_minus_cnt = 0
-        for i in range(len(date_format_with_numbers)):
-            if date_format_with_numbers[i] == '-':
-                num_minus_cnt += 1
-            else:
-                break
-
-        form_minus_cnt = 0
-        for i in range(len(date_format)):
-            if date_format[i] == '-':
-                form_minus_cnt += 1
-            else:
-                break
-
-        if num_minus_cnt > form_minus_cnt:
+        if is_neg:
             date_in_base_unit *= -1
 
         # Return date in base unit
-        return int(date_in_base_unit)
+        return date_in_base_unit
 
     def unit_for_unit_name(self, unit_name:str):
         self._check_compiled()
@@ -414,15 +593,14 @@ class TimeSystem:
         self._exact_divs.append(self.ExactDivision(name, name_of_unit_dividing, name_of_unit_dividing_into, division_defs, division_corrections))
         self._compiled = False
 
-    def add_repeating_division(self):
+    def add_repeating_division(self, name:str, name_of_unit_in:str, division_defs:list):
         """
         Add a RepeatingDivision such as a Week that just repeats over and over
             again throughout the Year without conforming to TimeExceptions i.e.
             without adding a day to account for Leap Days.
         """
-        #self._repeating_divs.append(self.RepeatingDivision)
-        #self._compiled = False
-        raise AssertionError("Unimplemented Method")
+        self._repeating_divs.append(self.RepeatingDivision(name, name_of_unit_in, division_defs))
+        self._compiled = False
 
     def compile(self):
         """
@@ -434,13 +612,14 @@ class TimeSystem:
         self._units_by_name = {}
         self._exceptions_by_name = {}
         self._exact_divs_by_name = {}
+        self._repeating_divs_by_name = {}
         self._base_unit = None
 
         for unit in self._units:
             unit.set_parent_unit(None)
             unit.children = []
 
-        # Put all units in dictionary by name
+        # Put all Units in dictionary by name
         for unit in self._units:
             assert not (unit.name in self._units_by_name), f'There cannot be two Units with the same name. Name in conflict: {unit.name}.'
             self._units_by_name[unit.name] = unit
@@ -449,6 +628,16 @@ class TimeSystem:
         for exception in self._exceptions:
             assert not (exception.name in self._exceptions_by_name), f'There cannot be two TimeExceptions with the same name. Name in conflict: {exception.name}.'
             self._exceptions_by_name[exception.name] = exception
+
+        # Put all Repeating Divisions in dictionary by name
+        for div in self._repeating_divs:
+            assert not (div.name in self._repeating_divs_by_name), f'There cannot be two RepeatingDivisions with the same name. Name in conflict: {div.name}.'
+            self._repeating_divs_by_name[div.name] = div
+
+        # Put all ExactDivisions in dictionary by name
+        for div in self._exact_divs:
+            assert not (div.name in self._exact_divs_by_name), f'There cannot be two ExactDivisions with the same name. Name in conflict: {div.name}.'
+            self._exact_divs_by_name[div.name] = div
 
         # Set up unit hierarchy
         for unit in self._units:
@@ -466,9 +655,6 @@ class TimeSystem:
 
         # Check that all ExactDivisions are valid
         for div in self._exact_divs:
-            assert not (div.name in self._exact_divs_by_name), f'There cannot be two ExactDivisions with the same name. Name in conflict: {div.name}.'
-            self._exact_divs_by_name[div.name] = div
-
             # Check that units have been defined (unit_for_unit_name will raise
             #   error now if they are not)
             div_dividing_unit = self.unit_for_unit_name(div.name_of_unit_dividing)
@@ -494,6 +680,10 @@ class TimeSystem:
             for div_c in div.div_corrections:
                 assert div.name_in_division_defs(div_c[1]), \
                         f"{div.name}'s correction for {div_c[0]} corrects {div_c[1]}, a subdivision that is not defined by/in {div.name}."
+
+        # Check that all RepeatingDivisions are valid
+        for div in self._repeating_divs:
+            assert div.name_of_unit_in in self._units_by_name, f'"{div.name}" is in "{div.name_of_unit_in}", a Unit that has not been defined/added to the TimeSystem.'
 
         # --------------
         # Now figure out working conversion factors (the ones used when actually estimating conversions)
@@ -570,14 +760,22 @@ class TimeSystem:
         """
         return unit.get_working_conversion_factor()
 
-    def _get_names_regex(self):
+    def _get_names_regex(self, hints:iter=None):
         """
         Returns a regular expression that can be used to find all instances of
             Unit names and Division names in a string.
+
+        hints is just in iterable of other strings that you want included in the regex.
         """
         unit_names_regex = '('
-        unit_names = [name for name in self._units_by_name.keys()]
-        unit_names.extend([name for name in self._exact_divs_by_name.keys()])
+        unit_names = [regex_escape_str(name) for name in self._units_by_name.keys()]
+        unit_names.extend([regex_escape_str(name) for name in self._exact_divs_by_name.keys()])
+        unit_names.extend([regex_escape_str(name) for name in self._repeating_divs_by_name.keys()])
+
+        if hints is not None:
+            hints = [regex_escape_str(hint) for hint in hints]
+            unit_names.extend(hints)
+
         for i, unit_name in enumerate(unit_names):
             if i > 0:
                 unit_names_regex += r'|'
@@ -586,7 +784,7 @@ class TimeSystem:
 
         return unit_names_regex
 
-    def _split_date_format(self, date_format:str):
+    def _split_date_format(self, date_format:str, nicknames_set:set):
         """
         Takes a format in a string and splits it inclusively.
 
@@ -595,19 +793,23 @@ class TimeSystem:
             units with the names "Day", "Month", and "Year") and return it.
         """
         self._check_compiled()
-        unit_names_regex = self._get_names_regex()
+        unit_names_regex = self._get_names_regex(nicknames_set)
         return split_inclusive(unit_names_regex, date_format)
 
     def _check_compiled(self):
         assert self._compiled, 'You must compile the TimeSystem before using it.'
 
     def _unit_for_unit_name(self, unit_name:str):
-        assert unit_name in self._units_by_name, f'There is no defined unit in the {self.name} TimeSystem with the name \"{unit_name}\"'
+        assert unit_name in self._units_by_name, f'There is no defined Unit in the {self.name} TimeSystem with the name \"{unit_name}\"'
         return self._units_by_name[unit_name]
 
     def _exact_div_for_exact_div_name(self, div_name:str):
-        assert div_name in self._exact_divs_by_name, f'There is no defined exact_div in the {self.name} TimeSystem with the name \"{div_name}\"'
+        assert div_name in self._exact_divs_by_name, f'There is no defined ExactDivision in the {self.name} TimeSystem with the name \"{div_name}\"'
         return self._exact_divs_by_name[div_name]
+
+    def _repeating_div_for_repeating_div_name(self, div_name:str):
+        assert div_name in self._repeating_divs_by_name, f'There is no defined RepeatingDivision in the {self.name} TimeSystem with the name \"{div_name}\"'
+        return self._repeating_divs_by_name[div_name]
 
     def _exception_for_exception_name(self, exception_name:str):
         assert exception_name in self._exceptions_by_name, f'There is no defined TimeException in the {self.name} TimeSystem with the name \"{exception_name}\"'
@@ -648,6 +850,31 @@ class TimeSystem:
 
         return offset_names, offsets
 
+    def _check_formats_same(self, split_num_format, other_format, nicknames_set):
+        """
+        This format checks that two formats, one with numbers and the other
+            without, are the same
+        """
+        if len(split_num_format) != len(other_format):
+            return False
+
+        for num_str, other_str in zip(split_num_format, other_format):
+            try:
+                Decimal(num_str)
+                continue
+            except InvalidOperation:
+                # Then num_str is not a Decimal, so either stands for a nickname
+                #   or is a delimiter
+                if num_str in nicknames_set:
+                    # its a nickname like Mon., Tue., Wed., etc. so no different
+                    #   than if it were a number
+                    continue
+
+                # It's a delimiter, so make sure that they are the same delimiters
+                if num_str != other_str:
+                    return False
+        return True
+
     # -------------------------------------------------------------------------
     # Helper Classes
 
@@ -667,20 +894,24 @@ class TimeSystem:
             self.add_amount_unit_name = add_amount_unit_name
 
         def __repr__(self):
-            return f'TimeException(Every {self.interval_amount} {self.interval_amount_unit_name}(s), add {self.add_amount} {self.add_amount_unit_name}(s))'
+            return f'{self.__class__.__name__}(Every {self.interval_amount} {self.interval_amount_unit_name}(s), add {self.add_amount} {self.add_amount_unit_name}(s))'
 
     class ExactDivision:
+        """
+        An ExactDivision takes a Unit and divides it into smaller pieces exactly.
+            For example, a Year can be divided into Months, and Months are
+            defined in Days. You may be tempted to just make them Units,
+            but then they will be averaged to about 30 days each and you
+            cannot label them as January, February, March, etc. so this is
+            what you should use if you want to label each division.
+        """
+
         def __init__(self, name:str, name_of_unit_dividing:str, name_of_unit_dividing_into:str, division_defs:list, division_corrections:list):
             """
-            An ExactDivision takes a Unit and divides it into smaller pieces exactly.
-                For example, a Year can be divided into Months, and Months are
-                defined in Days. You may be tempted to just make them Units,
-                but then they will be averaged to about 30 days each and you
-                cannot label them as January, February, March, etc. so this is
-                what you should use if you want to label each division.
-
-            division_defs should be in form:
-                [("Name", int), ("January", 31), ("February", 28),("March", 31), ...]
+            division_defs should be in form
+                [("Name", int duration), ("January", 31), ("February", 28),("March", 31), ...]
+                and define what each division's name is as well as how many of
+                the unit_dividing_into it takes up. So January takes 31 Days.
 
             division_corrections should be in form:
                 [("Name of TimeException", "Name of division_def to fix when exception occurs"),
@@ -688,7 +919,9 @@ class TimeSystem:
 
                 and is so that divisions can be fixed when a TimeException occurs,
                 adding or subtracting time from the unit the ExactDivision is
-                dividing.
+                dividing. For example, there is a TimeException that says
+                that every 4 years, a Day is added. What is that one Day added
+                to? February, so you need to say that.
             """
             assert name is not None, "Every ExactDivision must have a name. It cannot have a Null (None) name."
             assert name_of_unit_dividing is not None, "Every ExactDivision must have a name_of_unit_dividing. It cannot be Null (None)."
@@ -740,8 +973,35 @@ class TimeSystem:
 
             return found
 
+        def __repr__(self):
+            return f'{self.__class__.__name__}(name={self.name})'
+
     class RepeatingDivision(ExactDivision):
-        pass
+        """
+        A RepeatingDivision is something like a Week that just repeats endlessly
+            without having to fit into another Unit like a Year exactly.
+        """
+        def __init__(self, name:str, name_of_unit_in:str, division_defs:list):
+            """
+            division_defs are in form
+                [(div_name:str, number of unit in it takes up:int or Decimal),
+                    ("Monday", 1), ("Tuesday", 1), etc.]
+            """
+            super().__init__()
+            assert name is not None, f"Every {self.__class__.__name__} must have a name."
+            assert name_of_unit_in is not None, f"Every {self.__class__.__name__} must have a unit that it is in. For example, a Week is in Days."
+            self.name = name
+            self.name_of_unit_in = name_of_unit_in
+            self.division_defs = division_defs
+
+            # Figure out the total time for a repetition. For Example, a Week
+            #   repeats every 7 days
+            self.repetition_time = 0
+            for div_def in division_defs:
+                self.repetition_time += div_def[1]
+
+        def __repr__(self):
+            return f'{self.__class__.__name__}(name={self.name})'
 
     class Unit:
         def __init__(self, name:str, conversion_factor:Decimal=Decimal(1), parent_unit_name:str=None):
@@ -870,11 +1130,10 @@ if __name__ == '__main__':
     print("")
     print("__Base_To_Format__")
 
-    def base_to_format_test(date_in_base, date_format, desired_date_format_result, one_based_units=None):
-        one_based_units = [] if one_based_units is None else one_based_units
-        in_base_format = greg_calander.base_to_format(date_in_base, date_format, one_based_units=one_based_units)
+    def base_to_format_test(date_in_base, date_format, desired_date_format_result, neg_date_format:str=None, one_based_units=None, nicknames:dict=None):
+        in_base_format = greg_calander.base_to_format(date_in_base, date_format, one_based_units=one_based_units, neg_date_format=neg_date_format, nicknames=nicknames)
         print(f'{date_in_base} Second(s) = {in_base_format} ({date_format})')
-        assert in_base_format == desired_date_format_result, f'Format is wrong. Should be: {desired_date_format_result}'
+        assert in_base_format == desired_date_format_result, f'Result was wrong. The result was "{in_base_format}" but should be "{desired_date_format_result}".'
         return in_base_format
 
     base_to_format_test(year_in_sec, ':Year:Day:Second:', ':1:0:0:')
@@ -886,15 +1145,14 @@ if __name__ == '__main__':
     print("")
     print("__Format_To_Base__")
 
-    def format_to_base_test(date_in_format, date_format, desired_date_result, origional_date_in_base_unit=0, one_based_units=None):
-        one_based_units = [] if one_based_units is None else one_based_units
-        in_base_unit = greg_calander.format_to_base(date_in_format, date_format, origional_date_in_base_unit, one_based_units=one_based_units)
+    def format_to_base_test(date_in_format, date_format, desired_date_result, origional_date_in_base_unit=0, one_based_units=None, nicknames=None, neg_date_format=None):
+        in_base_unit = greg_calander.format_to_base(date_in_format, date_format, origional_date_in_base_unit, one_based_units=one_based_units, nicknames=nicknames, neg_date_format=neg_date_format)
         print(f'({date_format}) {date_in_format} = {int(in_base_unit)} {greg_calander._base_unit.name}(s)')
         assert in_base_unit == desired_date_result, f'Date in base unit is wrong. Should be: {desired_date_result}. ({date_in_format} in {date_format}) {f"origional_date_in_base_unit: {origional_date_in_base_unit}" if origional_date_in_base_unit == 0 else ""}.'
         return in_base_unit
 
     format_to_base_test(':2021:21:1:', ':Year:Day:Second:', (year_in_sec * 2021) + (day_in_sec * 21) + 1)
-    format_to_base_test('-:2021:21:1:', ':Year:Day:Second:', -((year_in_sec * 2021) + (day_in_sec * 21) + 1))
+    format_to_base_test('-:2021:21:1:', ':Year:Day:Second:', -((year_in_sec * 2021) + (day_in_sec * 21) + 1), neg_date_format='-:Year:Day:Second:')
 
     # Define Month
     FEBRUARY = 'February'
@@ -909,23 +1167,81 @@ if __name__ == '__main__':
             ])
     greg_calander.compile()
 
-    ONE_BASED_UNITS = ["Month", "Day"]
+    ONE_BASED_UNITS = ["Month", "Day", "Week"]
 
     AMERICAN_FORMAT = 'Month/Day/Year'
     in_base = format_to_base_test('6/26/2021', AMERICAN_FORMAT, 63791806392, one_based_units=ONE_BASED_UNITS)
-    base_to_format_test(in_base, AMERICAN_FORMAT, '6/26/2021', ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '6/26/2021', one_based_units=ONE_BASED_UNITS)
 
     print("")
     print("__Leap_Years__")
 
     in_base = format_to_base_test('2/29/2020', AMERICAN_FORMAT, 63750140640, one_based_units=ONE_BASED_UNITS)
-    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2020', ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2020', one_based_units=ONE_BASED_UNITS)
 
     in_base = format_to_base_test('2/29/2100', AMERICAN_FORMAT, 66274696800, one_based_units=ONE_BASED_UNITS)
-    base_to_format_test(in_base, AMERICAN_FORMAT, '3/1/2100', ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '3/1/2100', one_based_units=ONE_BASED_UNITS)
 
     in_base = format_to_base_test('2/29/2400', AMERICAN_FORMAT, 75741782400, one_based_units=ONE_BASED_UNITS)
-    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2400', ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2400', one_based_units=ONE_BASED_UNITS)
 
+    print("")
+    print("__Weeks__")
+
+    greg_calander.add_repeating_division('Week', 'Day', [
+            ('Sunday', 1), ('Monday', 1), ('Tuesday', 1), ('Wednesday', 1),
+            ('Thursday', 1), ('Friday', 1), ('Saturday', 1)
+        ])
+    greg_calander.compile()
+
+    NICKNAMES = \
+        {
+            'wk': {
+                'nick_for': 'Week',
+                'names': {
+                    0: 'Sun.',
+                    1: 'Mon.',
+                    2: 'Tue.',
+                    3: 'Wed.',
+                    4: 'Thu.',
+                    5: 'Fri.',
+                    6: 'Sat.',
+                }
+            },
+            'mn': {
+                'nick_for': 'Month',
+                'names': {
+                    0: 'Jan.',
+                    1: 'Feb.',
+                    2: 'Mar.',
+                    3: 'Apr.',
+                    4: 'May.',
+                    5: 'Jun.',
+                    6: 'Jul.',
+                    7: 'Aug.',
+                    8: 'Sep.',
+                    9: 'Oct.',
+                    10:'Nov.',
+                    11:'Dec.'
+                }
+            },
+            'MN': {
+                'nick_for': 'Month',
+                'names': {
+                    0: 'January',
+                    1: 'February',
+                    2: 'March',
+                    3: 'April',
+                    4: 'May',
+                    5: 'June',
+                    6: 'July',
+                    7: 'August',
+                    8: 'September',
+                    9: 'October',
+                    10:'November',
+                    11:'December'
+                }
+            }
+        }
 
 

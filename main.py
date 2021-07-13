@@ -13,6 +13,7 @@ Note: This TimeSystem is made to be consistent. If you convert 5/20/2020
     back into the format. It may, however, be a bit off when you are just
     trying to get the number of seconds in 100000000 Years, because it
     turns the "Every 4 years, add 1 day." into an estimate (1 Year = 365.25 Days)
+    (it averages the amount of time added by the exceptions)
 
 TODO:
     - Allow negative formats to be given so that if a date_in_base_unit is
@@ -164,6 +165,8 @@ class TimeSystem:
         if date_in_base_unit < 0:
             date_in_base_unit *= -1 # Having the date be negative might mess things up, so make it possitive
 
+            # If no negative date format is specified, the negative does not matter
+            #   because there is no way to format the date to express it.
             if neg_date_format is not None:
                 should_be_neg = True
 
@@ -226,11 +229,15 @@ class TimeSystem:
         # ----------
         # Do ExactDivisions
         for div in used_exact_divs:
-            _, offsets_in_base_unit = self._get_exact_div_offsets(date_in_base_unit, div.name)
+            offset_names, offsets_in_base_unit = self._get_exact_div_offsets(date_in_base_unit, div.name)
 
             unit_dividing = self._unit_for_unit_name(div.name_of_unit_dividing)
             unit_dividing_into = self._unit_for_unit_name(div.name_of_unit_dividing_into)
-            remainder = date_in_base_unit % unit_dividing.to_base(1)
+
+            if unit_dividing_into.name in unit_values:
+                remainder = unit_dividing_into.to_base(unit_values[unit_dividing_into.name])
+            else:
+                remainder = date_in_base_unit % unit_dividing.to_base(1)
             total_offset = 0
             for i in range(len(offsets_in_base_unit)):
                 # If offsets are:
@@ -238,6 +245,7 @@ class TimeSystem:
                 #   [       31,         28,      31]
                 #   and it is March, then after subtracting 31, 28, and 31
                 #   from the remainder should make the remainder negative
+                old_remander = remainder
                 remainder -= offsets_in_base_unit[i]
                 if remainder <= 0:
                     if not (div.name in unit_values):
@@ -259,7 +267,7 @@ class TimeSystem:
         for div in self._repeating_divs:
             unit_in = self._unit_for_unit_name(div.name_of_unit_in)
 
-            rep_time_in_base_unit = unit_in.to_base(unit_in)
+            rep_time_in_base_unit = unit_in.to_base(div.repetition_time)
             remainder = date_in_base_unit % rep_time_in_base_unit
 
             offset_names = [o[0] for o in div.division_defs]
@@ -286,7 +294,7 @@ class TimeSystem:
             unit_str = string
             if string in nicknames:
                 unit_str = nicknames[string]['nick_for']
-                nick_vals = nicknames['names']
+                nick_vals = nicknames[string]['names']
             else:
                 nick_vals = {}
 
@@ -331,16 +339,22 @@ class TimeSystem:
         self._check_compiled()
 
         one_based_units = [] if one_based_units is None else one_based_units
-        nicknames = [] if nicknames is None else nicknames
+        nicknames = {} if nicknames is None else nicknames
 
         origional_date_in_base_unit = confirm_is_type_decimal(origional_date_in_base_unit)
 
-        nicknames_set = set()
-        for _, val in nicknames:
-            nicknames_set.update(val['names'].values())
+        nicknames_set = set(val for val in nicknames.keys())
+        nickname_values_dict = {}
 
         # Split formats
-        split_num_date_format = split_inclusive('[0-9]+\.{0,1}[0-9]*', date_format_with_numbers)
+        date_val_regex = "([0-9]+\.{0,1}[0-9]*"
+        for nick_info in nicknames.values():
+            for key, val in nick_info['names'].items():
+                nickname_values_dict[val] = key
+                date_val_regex += "|" + regex_escape_str(val)
+        date_val_regex += ")"
+        split_num_date_format = split_inclusive(date_val_regex, date_format_with_numbers)
+
         split_pos_date_format = self._split_date_format(date_format, nicknames_set)
         is_neg = False
 
@@ -388,15 +402,8 @@ class TimeSystem:
 
             # If num_date_str str is a nickname (i.e. Mon., Tue., Wed., etc.) then
             #   convert it to its value (0, 1, 2, etc.)
-            if num_date_str in nicknames_set:
-                for type_as, val in nicknames:
-                    for key, value in val['names']:
-                        if num_date_str == value:
-                            num_date_str = key
-                            break_out = True
-                            break
-                    if break_out:
-                        break
+            if num_date_str in nickname_values_dict:
+                num_date_str = nickname_values_dict[num_date_str]
 
             # Evaluate Units to base Unit
             if date_form_str in self._units_by_name:
@@ -426,7 +433,7 @@ class TimeSystem:
             # Note RepeatingDivisions
             elif date_form_str in self._repeating_divs_by_name:
                 if date_form_str in one_based_units:
-                    rep_divs_used.append((date_form_str, int(num_date_str - 1)))
+                    rep_divs_used.append((date_form_str, int(num_date_str) - 1))
                 else:
                     rep_divs_used.append((date_form_str, int(num_date_str)))
 
@@ -448,19 +455,28 @@ class TimeSystem:
             if not (div_into_unit in units_used):
                 units_used.append(div_into_unit)
 
-            _, offsets = self._get_exact_div_offsets(date_in_base_unit, div_name)
+            # Have to do this next time twice. The first time adds the amount of
+            #   time estimated, while the second time does it more exactly
+            #   because it takes into account the date_in_base_unit with the
+            #   amount of time added by the ExactDivision added
+            date_in_base_unit_temp = date_in_base_unit
+            for i in range(2):
+                time_to_add = 0
+                offset_names, offsets = self._get_exact_div_offsets(date_in_base_unit_temp, div_name)
 
-            # If offsets are:
-            #   ["January", "February", "March"]
-            #   [       31,         28,      31]
-            # and it is march, then the offset is 31 + 28 in order to get to march
-            for i in range(len(offsets)):
-                if i < offset_index:
-                   time_to_add += offsets[i]
-                else:
-                    break
+                # If offsets are:
+                #   ["January", "February", "March"]
+                #   [       31,         28,      31]
+                # and it is march, then the offset is 31 + 28 in order to get to march
+                for i in range(len(offsets)):
+                    if i < offset_index:
+                       time_to_add += offsets[i]
+                    else:
+                        break
 
-        date_in_base_unit += time_to_add
+                date_in_base_unit_temp = date_in_base_unit_temp + time_to_add
+
+            date_in_base_unit += time_to_add
 
         # Now figure out repeating divisions, making the current date allign
         #   with them.
@@ -507,7 +523,7 @@ class TimeSystem:
                 date_in_base_unit -= unit_in.to_base(time_to_add)
 
             if not (div.name_of_unit_in in units_used):
-                units_used.append(div.name_of_unit_in)
+                units_used.append(self._unit_for_unit_name(div.name_of_unit_in))
 
         # --------
         # Make sure that no units larger or smaller than specified are overwritten
@@ -837,11 +853,16 @@ class TimeSystem:
             exception = self._exception_for_exception_name(div_c[0])
 
             # Check if exception applies for given date
+
             interval_unit = self._unit_for_unit_name(exception.interval_amount_unit_name)
-            interval_amt = int(exception.interval_amount)
+            interval_amt = interval_unit.to_base(exception.interval_amount)
+
+            # Get rid of all units smaller than the one we are interested in so
+            #   that if divided by interval unit, will have 0 remainder if applies
+            applicable_date = date_in_base_unit - (date_in_base_unit % interval_unit.to_base(1))
 
             # If applies, then add the time
-            if (0 == (int(interval_unit.from_base(date_in_base_unit)) % interval_amt)):
+            if (0 == (applicable_date % interval_amt)):
                 add_amt_unit = self._unit_for_unit_name(exception.add_amount_unit_name)
 
                 for i in range(len(offset_names)):
@@ -976,7 +997,7 @@ class TimeSystem:
         def __repr__(self):
             return f'{self.__class__.__name__}(name={self.name})'
 
-    class RepeatingDivision(ExactDivision):
+    class RepeatingDivision:
         """
         A RepeatingDivision is something like a Week that just repeats endlessly
             without having to fit into another Unit like a Year exactly.
@@ -1093,12 +1114,12 @@ if __name__ == '__main__':
 
     def test_unit_to_base(date_in_unit, unit_name):
         date_in_base = greg_calander.unit_to_base_unit(date_in_unit, unit_name)
-        print(f'There are {date_in_base} {greg_calander._base_unit.name}(s) in {date_in_unit} {unit_name}(s)')
+        print(f'There is/are {date_in_base} {greg_calander._base_unit.name}(s) in {date_in_unit} {unit_name}(s)')
         return date_in_base
 
     def test_base_to_unit(date_in_base, unit_name):
         date_in_unit = greg_calander.base_unit_to_unit(date_in_base, unit_name)
-        print(f'There are {date_in_base} {greg_calander._base_unit.name}(s) in {date_in_unit} {unit_name}(s)')
+        print(f'There is/are {date_in_unit} {unit_name}(s) in {date_in_base} {greg_calander._base_unit.name}(s)')
         return date_in_unit
 
     year_in_sec = test_unit_to_base(1, 'Year')
@@ -1160,14 +1181,14 @@ if __name__ == '__main__':
             [
                 ('January', 31),   (FEBRUARY, 28), ('March', 31),    ('April', 30),
                 ('May', 31),       ('June', 30),     ('July', 31),     ('August', 31),
-                ('Septemder', 30), ('October', 31),  ('November', 30), ('December', 31)
+                ('September', 30), ('October', 31),  ('November', 30), ('December', 31)
             ],
             [
                 (LEAP_DAY_4, FEBRUARY), (LEAP_DAY_100, FEBRUARY), (LEAP_DAY_400, FEBRUARY)
             ])
     greg_calander.compile()
 
-    ONE_BASED_UNITS = ["Month", "Day", "Week"]
+    ONE_BASED_UNITS = ["Month", "Day"]
 
     AMERICAN_FORMAT = 'Month/Day/Year'
     in_base = format_to_base_test('6/26/2021', AMERICAN_FORMAT, 63791806392, one_based_units=ONE_BASED_UNITS)
@@ -1176,12 +1197,27 @@ if __name__ == '__main__':
     print("")
     print("__Leap_Years__")
 
+    print() # Leap Year
     in_base = format_to_base_test('2/29/2020', AMERICAN_FORMAT, 63750140640, one_based_units=ONE_BASED_UNITS)
     base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2020', one_based_units=ONE_BASED_UNITS)
 
+    print() # Underflow test on Leap Year
+    in_base = format_to_base_test('3/0/2020', AMERICAN_FORMAT, 63750140640, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2020', one_based_units=ONE_BASED_UNITS)
+
+    print() # Underflow Test on Non-Leap Year
+    in_base = format_to_base_test('3/0/2100', AMERICAN_FORMAT, 66274610400, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '2/28/2100', one_based_units=ONE_BASED_UNITS)
+
+    print() # Overflow Test on Leap Year
     in_base = format_to_base_test('2/29/2100', AMERICAN_FORMAT, 66274696800, one_based_units=ONE_BASED_UNITS)
     base_to_format_test(in_base, AMERICAN_FORMAT, '3/1/2100', one_based_units=ONE_BASED_UNITS)
 
+    print() # Underflow Test on leap Year
+    in_base = format_to_base_test('3/0/2400', AMERICAN_FORMAT, 75741782400, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2400', one_based_units=ONE_BASED_UNITS)
+
+    print() # Test consistency on Leap Year
     in_base = format_to_base_test('2/29/2400', AMERICAN_FORMAT, 75741782400, one_based_units=ONE_BASED_UNITS)
     base_to_format_test(in_base, AMERICAN_FORMAT, '2/29/2400', one_based_units=ONE_BASED_UNITS)
 
@@ -1193,6 +1229,27 @@ if __name__ == '__main__':
             ('Thursday', 1), ('Friday', 1), ('Saturday', 1)
         ])
     greg_calander.compile()
+
+    WEEK_FORMAT = "Month/Week/Day/Year"
+
+    print() # Test proper week day is gotten from base_to_format
+    in_base = format_to_base_test('7/12/2021', AMERICAN_FORMAT, 63793188792, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, WEEK_FORMAT, '7/1/12/2021', one_based_units=ONE_BASED_UNITS) # 1 because it is a Monday and "Week" is not in ONE_BASED_UNITS
+
+    print() # Test that proper Week day is gotten from format_to_base
+    in_base = format_to_base_test('7/1/12/2021', WEEK_FORMAT, 63793188792, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, WEEK_FORMAT, '7/1/12/2021', one_based_units=ONE_BASED_UNITS)
+
+    print() # Test that Week days change the day to make it work. So if you say it is a Friday, it will add enough time to make it a Friday if it is not already
+    in_base = format_to_base_test('7/5/12/2021', WEEK_FORMAT, 63793534392, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, WEEK_FORMAT, '7/5/16/2021', one_based_units=ONE_BASED_UNITS)
+
+    print() # Test that Days are changed to aggree with the Week day
+    in_base = format_to_base_test('7/5/2021', 'Month/Week/Year', 63792324792, one_based_units=ONE_BASED_UNITS)
+    base_to_format_test(in_base, WEEK_FORMAT, '7/5/2/2021', one_based_units=ONE_BASED_UNITS)
+
+    print("")
+    print("__Nicknames__")
 
     NICKNAMES = \
         {
@@ -1244,4 +1301,14 @@ if __name__ == '__main__':
             }
         }
 
+    NICKNAME_FORMAT = 'mn/wk/Day/Year'
 
+    print()
+    #in_base = format_to_base_test('July./Tue./13/2021', NICKNAME_FORMAT, 63790855992, one_based_units=ONE_BASED_UNITS, nicknames=NICKNAMES)
+    #base_to_format_test(in_base, NICKNAME_FORMAT, 'July./Tue./13/2021', one_based_units=ONE_BASED_UNITS, nicknames=NICKNAMES)
+
+    print("")
+    print("__Full_Format_Tests__")
+
+    FULL_FORMAT_DESCENDING = 'Year/Month/Day/Hour/Minute/Second'
+    FULL_FORMAT_ASCENDING = 'Second/Minute/Hour/Day/Month/Year'
